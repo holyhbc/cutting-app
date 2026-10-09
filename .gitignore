@@ -11,3 +11,5 @@ webapp/scan.db-wal
 webapp/scan.db-shm
 webapp/__pycache__/
 webapp/_vpsim.db*
+webapp/_push2.db*
+webapp/_phase2.db*

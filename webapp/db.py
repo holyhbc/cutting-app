@@ -110,6 +110,13 @@ def get_reported_by_employee(zdno, cc, zh, gx, ygno):
     return int(base[0])
 
 
+def get_scan_map_by_zdno(zdno):
+    """查某个定单已同步到本地的扎。打印前用它判断要不要重新推送。"""
+    rows = get_conn().execute(
+        "SELECT short_id, cc, zh FROM scan_map WHERE zdno=? ORDER BY cc, zh", (zdno,)).fetchall()
+    return [dict(r) for r in rows]
+
+
 def get_processes(zdno):
     """该定单可做的工序列表（gx 已在同步时限定 1~18）"""
     rows = get_conn().execute(

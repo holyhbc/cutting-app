@@ -2,7 +2,6 @@
   "label_qr_enabled": true,
   "label_qr_size_mm": 13.0,
   "label_qr_base_url": "https://cut.holyhbc.eu.org",
-
   "layout_version": 4,
   "page_width_mm": 210.0,
   "page_height_mm": 297.0,
@@ -32,5 +31,7 @@
   "summary_qr_size_mm": 25.0,
   "summary_qr_gap_mm": 3.0,
   "summary_qr_base_url": "https://cut.holyhbc.eu.org",
-  "summary_qr_server_port": 8765
+  "summary_qr_server_port": 8765,
+  "scan_server_url": "https://cut.holyhbc.eu.org",
+  "scan_sync_token": ""
 }

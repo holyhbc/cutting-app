@@ -426,6 +426,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "stats": D.stats()}, head_only=head_only)
             if path == "/api/pending":
                 return self._handle_pending()
+            if path == "/api/scanmap":
+                return self._handle_scanmap()
             if path == "/admin/pending":
                 return self._send(200, page_pending(D.list_pending(500)),
                                   head_only=head_only)
@@ -462,6 +464,18 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": False, "msg": "令牌不正确"}, 401)
             return False
         return True
+
+    def _handle_scanmap(self):
+        """打印端问：某个定单同步过来没有？缺哪些扎？"""
+        if not self._auth_sync():
+            return
+        u = urlparse(self.path)
+        zdno = (parse_qs(u.query).get("zdno", [""])[0] or "").strip()
+        if not zdno:
+            return self._json({"ok": False, "msg": "缺少 zdno 参数"}, 400)
+        rows = D.get_scan_map_by_zdno(zdno)
+        return self._json({"ok": True, "zdno": zdno, "count": len(rows),
+                           "zhs": [r["zh"] for r in rows]})
 
     def _handle_pending(self):
         """局域网同步器拉取待回写的报工。"""

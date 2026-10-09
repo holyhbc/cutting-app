@@ -1728,6 +1728,10 @@ DEFAULT_BARCODE_CONFIG = {
     # 留空则不画二维码（避免印出扫不出用的码）。
     # 必须是 http(s) 地址，微信才能按网页打开。
     "label_qr_base_url": "",
+    # 扫码服务器：打印前用它同步短ID映射，否则工人扫码会提示「标签还没同步」
+    "scan_server_url": "https://cut.holyhbc.eu.org",
+    # 推送令牌。留空则读环境变量 SYNC_TOKEN（推荐，不落明文）
+    "scan_sync_token": "",
 
     # 二维码必须是 http(s) 地址，微信才能按网页打开。
     # 留空时自动使用本机局域网IP，例如 http://192.168.0.100:8765
@@ -1958,6 +1962,125 @@ def build_number_assignments(start_num, end_num, mode, color_data):
         item = expanded[idx] if idx < len(expanded) else {"color": "", "size": "", "quantity": 0}
         assignments.append({"number": number, **item})
     return assignments
+
+
+# ==================== 同步到扫码服务器 ====================
+# 打印前把该定单的短ID映射推到 VPS，否则工人扫码会提示「标签还没同步」。
+# 推送方向：局域网/打印电脑 -> VPS（VPS 从不连 SQL Server，见 DECISIONS D-009）。
+
+def cfg_has_qr():
+    """标签二维码是否已开启。未开启时不必同步，省一次网络往返。"""
+    try:
+        cfg = load_barcode_config()
+    except Exception:
+        return False
+    return bool(cfg.get("label_qr_enabled", False)) and bool(cfg.get("label_qr_base_url", ""))
+
+
+def _scan_server_cfg():
+    """扫码服务器地址与令牌。令牌优先读环境变量，避免明文写进配置文件。"""
+    try:
+        cfg = load_barcode_config()
+    except Exception:
+        cfg = {}
+    server = str(cfg.get("scan_server_url", "") or "").strip().rstrip("/")
+    token = str(os.environ.get("SYNC_TOKEN", "") or "").strip()
+    if not token:
+        token = str(cfg.get("scan_sync_token", "") or "").strip()
+    return server, token
+
+
+def _scan_api(server, token, path, payload=None, timeout=30):
+    """调用扫码服务器的 JSON 接口。"""
+    import urllib.request as _rq
+    import urllib.error as _re_
+    url = server.rstrip("/") + path
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
+    req = _rq.Request(url, data=data,
+                     headers={"Content-Type": "application/json; charset=utf-8",
+                              "Authorization": f"Bearer {token}"},
+                     method="POST" if data is not None else "GET")
+    with _rq.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def check_scan_map_synced(zdno):
+    """问服务器：这个定单同步了吗？返回 (已同步扎数, 服务器配的列表)；未配服务器返回 (None, [])。"""
+    server, token = _scan_server_cfg()
+    if not server or not token:
+        return None, []
+    try:
+        d = _scan_api(server, token, f"/api/scanmap?zdno={urllib.parse.quote(zdno)}")
+        return int(d.get("count") or 0), d.get("zhs") or []
+    except Exception as e:
+        print(f"查询扫码服务器失败：{e}")
+        return -1, []
+
+
+def push_scan_map_for_zdno(zdno, cc=None):
+    """把该定单的 扎/工序/已报基线 推送到扫码服务器。
+
+    返回 (成功条数, 说明)。失败不抛异常，由调用方决定是否阻断打印。
+    """
+    server, token = _scan_server_cfg()
+    if not server or not token:
+        return 0, "未配置扫码服务器，已跳过同步"
+
+    conn = get_conn(conn_str, timeout=15)
+    try:
+        cursor = conn.cursor()
+        if cc is None:
+            cursor.execute("SELECT DISTINCT cc FROM jfzd2 WHERE zdno = ? ORDER BY cc", zdno)
+            ccs = [int(r[0]) for r in cursor.fetchall() if r[0] is not None]
+        else:
+            ccs = [int(cc)]
+        if not ccs:
+            return 0, f"{zdno} 没有裁剪明细，无法同步"
+
+        bundle, scan_map, baseline = [], [], []
+        for c in ccs:
+            cursor.execute(
+                "SELECT zh, ISNULL(YS,''), ISNULL(CM,''), ISNULL(SUM(JS),0) "
+                "FROM jfzd2 WHERE zdno = ? AND cc = ? GROUP BY zh, YS, CM ORDER BY zh",
+                zdno, c)
+            for zh, ys, cm, js in cursor.fetchall():
+                bundle.append({"zdno": zdno, "cc": c, "zh": int(zh),
+                               "yn": ys or "", "cm": cm or "",
+                               "plan_qty": int(js or 0)})
+                scan_map.append({"short_id": gen_short_id(zdno, c, int(zh)),
+                                 "zdno": zdno, "cc": c, "zh": int(zh)})
+            cursor.execute(
+                "SELECT zh, gx, ISNULL(SUM(js),0) FROM jfgz "
+                "WHERE zdno = ? AND cc = ? AND cc IS NOT NULL AND zh IS NOT NULL "
+                "GROUP BY zh, gx", zdno, c)
+            for zh, gx, rep in cursor.fetchall():
+                baseline.append({"zdno": zdno, "cc": c, "zh": int(zh), "gx": int(gx),
+                                 "reported_qty": int(rep or 0)})
+
+        # 工序：必须限定 gx BETWEEN 1 AND 18，实库有 5 个定单存在 gx>18 脏数据
+        cursor.execute(
+            "SELECT gx, ISNULL(gxname,''), ISNULL(dj,0) FROM jfdj "
+            "WHERE zdno = ? AND gx BETWEEN 1 AND 18 ORDER BY gx", zdno)
+        process = [{"zdno": zdno, "gx": int(r[0]), "gxname": r[1] or "",
+                    "dj": float(r[2] or 0)} for r in cursor.fetchall()]
+
+        # 员工花名册：登录校验要用
+        cursor.execute("SELECT ygno, ygname, ISNULL(ygout,0) FROM ygzl")
+        ygzl = [{"ygno": r[0], "ygname": r[1] or "", "ygout": int(r[2] or 0)}
+                for r in cursor.fetchall()]
+    finally:
+        pass
+
+    if not bundle:
+        return 0, f"{zdno} 没有裁剪明细，无法同步"
+
+    d = _scan_api(server, token, "/api/snapshot", {
+        "replace": False, "ygzl": ygzl, "bundle": bundle,
+        "scan_map": scan_map, "process": process, "baseline": baseline,
+    }, timeout=60)
+    ok = d.get("ok")
+    n = len(bundle)
+    return (n if ok else 0), (f"已同步 {n} 扎到 {server}" if ok else str(d.get("msg")))
 
 
 def load_bundle_color_data(zdno, cc=None):
@@ -3464,6 +3587,10 @@ class App:
         self.load_bundle_btn = ttk.Button(self.add_btn_frame, text="📥 从数据库读取",
                                          command=self.load_bundle_from_db, width=16)
         self.load_bundle_btn.pack(side='left', padx=3)
+        # 把短ID映射推到扫码服务器，否则工人扫码会提示「标签还没同步」
+        self.sync_scan_btn = ttk.Button(self.add_btn_frame, text="☁ 同步到扫码服务器",
+                                        command=self.sync_scan_map_now, width=18)
+        self.sync_scan_btn.pack(side='left', padx=3)
         
         self.summary_hint_var = tk.StringVar(value="")
         self.summary_hint_label = ttk.Label(self.scrollable_frame, textvariable=self.summary_hint_var, 
@@ -4056,6 +4183,69 @@ class App:
             + ("\n  …" if len(rows) > 12 else "")
             + "\n\n每扎一行，请确认无误后再生成条码。")
 
+    def _current_full_zdno(self):
+        """界面上填的是「定单前缀 + 起止编号」，拼出完整 ZDNO。"""
+        prefix = self.new_zdno_prefix_var.get().strip()
+        if not prefix:
+            return ""
+        return f"{prefix}{self.start_num_var.get().strip()}-{self.end_num_var.get().strip()}"
+
+    def sync_scan_map_now(self, silent_ok=False):
+        """把当前定单的短ID映射推到扫码服务器。返回是否成功。"""
+        zdno = self._current_full_zdno()
+        if not zdno:
+            if not silent_ok:
+                messagebox.showwarning("提示", "请先填写定单号前缀")
+            return False
+        if not silent_ok:
+            self.status_var.set(f"⏳ 正在同步 {zdno} 到扫码服务器…")
+            self.update_idletasks()
+        try:
+            n, msg = push_scan_map_for_zdno(zdno)
+        except Exception as e:
+            if not silent_ok:
+                messagebox.showerror("同步失败", str(e))
+                self.status_var.set("❌ 同步失败")
+            else:
+                print(f"同步失败：{e}")
+            return False
+        if n:
+            self.status_var.set(f"✅ {msg}")
+            if not silent_ok:
+                messagebox.showinfo("同步成功",
+                                    f"定单 {zdno}\n{msg}\n\n现在打印的标签扫码就能用了。")
+        else:
+            self.status_var.set(f"⚠️ 同步未完成：{msg}")
+            if not silent_ok:
+                messagebox.showwarning("同步未完成", msg)
+        return n > 0
+
+    def ensure_scan_map_before_print(self, zdno):
+        """生成标签前自动检查：服务器上没有这个定单就自动同步一次。
+
+        断网或未配服务器时不阻断打印 —— 本地打印仍然有用，只是线上扫不开。
+        """
+        server, token = _scan_server_cfg()
+        if not server or not token:
+            return True
+        try:
+            count, _ = check_scan_map_synced(zdno)
+        except Exception:
+            return True
+        if count == 0:
+            self.status_var.set(f"⏳ {zdno} 尚未同步，正在自动同步…")
+            self.update_idletasks()
+            try:
+                n, msg = push_scan_map_for_zdno(zdno)
+            except Exception as e:
+                print(f"自动同步失败：{e}")
+                return True
+            if n:
+                self.status_var.set(f"✅ 已自动同步 {zdno}（{n} 扎）")
+            else:
+                print(f"自动同步未完成：{msg}")
+        return True
+
     def add_size_row(self):
         main_color = self.color_var.get().strip()
         main_qty = self.qty_var.get().strip()
@@ -4532,6 +4722,13 @@ class App:
         processes = get_print_processes(new_zdno)
         if not processes:
             raise ValueError(f"{new_zdno} 没有工序数据，无法生成条码")
+        # 生成标签前确保短ID已同步到扫码服务器，否则工人扫码提示「标签还没同步」。
+        # 失败不阻断：本地打印仍可用，只是线上扫不开。
+        if cfg_has_qr():
+            try:
+                self.ensure_scan_map_before_print(new_zdno)
+            except Exception as e:
+                print(f"自动同步到扫码服务器失败（不影响本地打印）：{e}")
         items = build_barcode_items(
             new_zdno, zdid, start_num, end_num, mode, color_data, processes,
             self.style_var.get(), **_qr_opts())
@@ -5463,6 +5660,11 @@ class App:
             self.update_stockin_btn_state()
             # 数据库插入成功后：选择打印模板 → 预览 → 用户确认后打印。
             try:
+                # 先把短ID映射推到扫码服务器，否则新标签印出来工人扫码会失败
+                try:
+                    self.ensure_scan_map_before_print(new_zdno)
+                except Exception as sync_e:
+                    print(f"自动同步到扫码服务器失败（不影响本地打印）：{sync_e}")
                 print_data = self.collect_current_print_data()
                 if messagebox.askyesno("条码打印", "数据已成功插入。\n\n是否进入条码打印？", parent=self.root):
                     self.choose_barcode_template_and_preview(print_data)
