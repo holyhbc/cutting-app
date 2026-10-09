@@ -170,7 +170,14 @@ sudo certbot renew --dry-run
 验证：
 ```bash
 curl -sI https://cut.holyhbc.eu.org/health | head -1     # 期望 HTTP/2 200
+curl -s  https://cut.holyhbc.eu.org/health               # 期望 {"ok":true,...}
 ```
+
+> ⚠️ **排查时用 `curl -s`，别用 `curl -sI`**。
+> `-I` 发的是 HEAD 请求。早期版本没实现 `do_HEAD`，
+> `BaseHTTPRequestHandler` 会回 `501 Unsupported method ('HEAD')`，
+> 很容易被误判成"服务没起来"或"nginx 配错了"。
+> 2026-10-09 已补上 `do_HEAD`，现在两者状态码一致。
 
 ---
 

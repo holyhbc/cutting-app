@@ -201,41 +201,52 @@ def page_pending(rows):
 class Handler(BaseHTTPRequestHandler):
     server_version = "ScanReport/1.0"
 
-    def _send(self, code, body, ctype="text/html; charset=utf-8"):
+    def _send(self, code, body, ctype="text/html; charset=utf-8", head_only=False):
         data = body.encode("utf-8") if isinstance(body, str) else body
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(data)
+        # HEAD 只回响应头，不写正文（否则客户端会一直等 body）
+        if not head_only:
+            self.wfile.write(data)
 
-    def _json(self, obj, code=200):
+    def _json(self, obj, code=200, head_only=False):
         self._send(code, json.dumps(obj, ensure_ascii=False),
-                   "application/json; charset=utf-8")
+                   "application/json; charset=utf-8", head_only=head_only)
 
     def log_message(self, fmt, *args):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
     # ---------------------------------------------------------- GET
     def do_GET(self):
+        self._route_get(head_only=False)
+
+    def do_HEAD(self):
+        # `curl -sI` 走的就是 HEAD。BaseHTTPRequestHandler 对未实现的方法
+        # 默认回 501 Not Implemented，会被误判成服务没起来，所以必须实现。
+        self._route_get(head_only=True)
+
+    def _route_get(self, head_only=False):
         u = urlparse(self.path)
         path = u.path.rstrip("/") or "/"
         try:
             if path == "/":
-                return self._send(200, page_home(D.stats()))
+                return self._send(200, page_home(D.stats()), head_only=head_only)
             if path == "/health":
-                st = D.stats()
-                return self._json({"ok": True, "stats": st})
+                return self._json({"ok": True, "stats": D.stats()}, head_only=head_only)
             if path == "/admin/pending":
-                return self._send(200, page_pending(D.list_pending(500)))
+                return self._send(200, page_pending(D.list_pending(500)),
+                                  head_only=head_only)
             if path.startswith("/api/bundle/"):
                 sid = path.rsplit("/", 1)[-1]
                 smap = D.get_scan_map(sid)
                 if not smap:
-                    return self._json({"ok": False, "msg": "二维码无效"}, 404)
+                    return self._json({"ok": False, "msg": "二维码无效"}, 404,
+                                      head_only=head_only)
                 return self._json({"ok": True, "bundle": R.bundle_view(
-                    smap["zdno"], smap["cc"], smap["zh"]), "map": smap})
+                    smap["zdno"], smap["cc"], smap["zh"]), "map": smap}, head_only=head_only)
             if path.startswith("/s/"):
                 sid = path.rsplit("/", 1)[-1]
                 err = parse_qs(u.query).get("e", [""])[0]
@@ -244,13 +255,13 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(404, page_scan(
                         {"zdno": "?", "cc": 0, "zh": 0, "short_id": sid},
                         {"plan_qty": 0, "processes": []},
-                        err="二维码无效或已过期，请重新打印标签"))
+                        err="二维码无效或已过期，请重新打印标签"), head_only=head_only)
                 view = R.bundle_view(smap["zdno"], smap["cc"], smap["zh"])
-                return self._send(200, page_scan(smap, view, err=err))
-            return self._send(404, "<h1>404</h1>")
+                return self._send(200, page_scan(smap, view, err=err), head_only=head_only)
+            return self._send(404, "<h1>404</h1>", head_only=head_only)
         except Exception as e:
             D.log_audit("error", f"GET {path}: {e}", self.client_address[0])
-            return self._send(500, f"<h1>500</h1><pre>{esc(e)}</pre>")
+            return self._send(500, f"<h1>500</h1><pre>{esc(e)}</pre>", head_only=head_only)
 
     def _handle_snapshot(self):
         """局域网同步器推送只读快照。需 Bearer 令牌，防止外部乱写。"""
