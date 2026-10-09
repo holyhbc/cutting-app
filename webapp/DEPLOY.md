@@ -12,7 +12,7 @@
 局域网 (192.168.0.x)                      VPS (64.110.73.90)
 ┌──────────────────────────┐            ┌─────────────────────────┐
 │ hbc-print 打印标签        │            │ nginx :443 (你已有)     │
-│   生成含二维码的标签       │            │   └─> scanapp :8000     │
+│   生成含二维码的标签       │            │   └─> scanapp :10080     │
 │                          │            │                         │
 │ sync_snapshot.py 定时运行  │──HTTPS───>│ app.py                  │
 │   读 SQL Server(只读)     │  POST      │   └─> SQLite /opt/scanapp│
@@ -78,7 +78,7 @@ After=network.target
 Type=simple
 User=YOUR_USER
 WorkingDirectory=/opt/scanapp
-Environment=PORT=8000
+Environment=PORT=10080
 Environment=SCAN_DB=/opt/scanapp/scan.db
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/usr/bin/python3 /opt/scanapp/app.py
@@ -120,7 +120,7 @@ journalctl -u scanapp -f        # 看日志
 自检（应返回 `{"ok":true,...}`）：
 
 ```bash
-curl -s http://127.0.0.1:8000/health
+curl -s http://127.0.0.1:10080/health
 ```
 
 ---
@@ -139,7 +139,7 @@ server {
     location /.well-known/acme-challenge/ { root /var/www/html; }
 
     location / {
-        proxy_pass http://127.0.0.1:8000;
+        proxy_pass http://127.0.0.1:10080;
         proxy_http_version 1.1;
         proxy_set_header Host              $host;
         proxy_set_header X-Real-IP         $remote_addr;
@@ -176,18 +176,38 @@ curl -sI https://cut.holyhbc.eu.org/health | head -1     # 期望 HTTP/2 200
 
 ## 6. 防火墙
 
-服务只监听 `127.0.0.1` 之外的 `8000` 由 nginx 代理，**不要**把 8000 直接暴露到公网：
+服务默认**只监听 `127.0.0.1:10080`**，由 nginx 代理对外提供 HTTPS。
+`10080` 端口本身**不需要**、也**不应该**放行到公网：
 
 ```bash
 sudo ufw status
 sudo ufw allow 80/tcp
 sudo ufw allow 443/tcp
-sudo ufw deny 8000/tcp      # 确保 8000 不对外
+sudo ufw deny 10080/tcp      # 兜底，确保 10080 不对外
 ```
 
-> 更稳妥：把 app.py 的监听地址改成 `127.0.0.1`。
-> 代码里目前是 `0.0.0.0`。若要改，把 `app.py` 中
-> `ThreadingHTTPServer(("0.0.0.0", PORT), Handler)` 改为 `("127.0.0.1", PORT)`。
+### 监听地址
+
+| 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `BIND_HOST` | `127.0.0.1` | **保持默认即可**，只有 nginx 需要访问它 |
+| `PORT` | `10080` | 与 nginx 的 `proxy_pass` 保持一致 |
+
+只有在**车间内网自测**、需要让手机直接连这台机器时，才设 `BIND_HOST=0.0.0.0`。
+启动日志里会打出「⚠️ 警告：正监听所有网卡」，提醒你确认防火墙。
+
+```bash
+# 内网自测时才这样起
+BIND_HOST=0.0.0.0 PORT=10080 python3 /opt/scanapp/app.py
+```
+
+systemd 配置里也建议显式写上，避免以后误改：
+
+```ini
+Environment=BIND_HOST=127.0.0.1
+Environment=PORT=10080
+```
+
 
 ---
 

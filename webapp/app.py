@@ -5,8 +5,9 @@
 不连 SQL Server，数据来自本地 SQLite 快照（决策 D-009）。
 
 启动：
-  python app.py                # 监听 0.0.0.0:8000
-  PORT=9000 python app.py
+  python app.py                # 监听 127.0.0.1:10080（默认，推荐）
+  PORT=9000 python app.py                    # 换端口
+  BIND_HOST=0.0.0.0 python app.py           # 监听所有网卡（需自行确认防火墙）
 
 接口：
   GET  /                      说明页
@@ -31,7 +32,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db as D
 import rules as R
 
-PORT = int(os.environ.get("PORT", "8000"))
+PORT = int(os.environ.get("PORT", "10080"))
+# 默认只监听本机，由 nginx 反向代理对外提供 HTTPS。
+# 只有确实需要局域网直连（例如车间内网自测）时才设 BIND_HOST=0.0.0.0。
+BIND_HOST = os.environ.get("BIND_HOST", "127.0.0.1")
 # 局域网同步器推送快照时用的令牌。没配就拒绝该接口，不给未鉴权的写入口。
 SYNC_TOKEN = os.environ.get("SYNC_TOKEN", "")
 MAX_SNAPSHOT_BYTES = int(os.environ.get("MAX_SNAPSHOT_BYTES", str(64 * 1024 * 1024)))
@@ -326,12 +330,16 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     D.init_db()
     st = D.stats()
-    srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"扫码报工服务已启动  http://0.0.0.0:{PORT}")
-    print(f"  扫码页示例: http://127.0.0.1:{PORT}/s/77ZMWCHC")
+    srv = ThreadingHTTPServer((BIND_HOST, PORT), Handler)
+    shown = "127.0.0.1" if BIND_HOST == "0.0.0.0" else BIND_HOST
+    print(f"扫码报工服务已启动  http://{shown}:{PORT}")
+    print(f"  监听地址: {BIND_HOST}  (对外请走 nginx + HTTPS，不要直接暴露 10080)")
+    print(f"  扫码页示例: http://{shown}:{PORT}/s/77ZMWCHC")
     print(f"  数据库: {D.DB_PATH}")
     print(f"  快照: 映射{st['scan_map']} 扎{st['bundle']} 工序{st['process']} "
           f"待同步{st['pending']}")
+    if BIND_HOST == "0.0.0.0":
+        print("  ⚠️ 警告：正监听所有网卡，请确认防火墙未放行该端口")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

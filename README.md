@@ -58,8 +58,8 @@ export HBC_PWD=1
 
 ```bash
 cd webapp
-PORT=8000 SYNC_TOKEN=你的令牌 python app.py
-# 浏览器打开 http://127.0.0.1:8000
+PORT=10080 SYNC_TOKEN=你的令牌 python app.py
+# 浏览器打开 http://127.0.0.1:10080
 ```
 
 部署到 VPS 见 [`webapp/DEPLOY.md`](webapp/DEPLOY.md)。
