@@ -117,6 +117,42 @@ def get_scan_map_by_zdno(zdno):
     return [dict(r) for r in rows]
 
 
+def get_bundle_colors(zdno, cc, zh):
+    """某一扎的颜色/尺码/数量明细。
+
+    一扎可能有多行（不同颜色×尺码），实例如：
+    扎1 火山灰 均码 264 / 扎2 奶茶棕 均码 406 / 扎3 棕咖 均码 42
+    """
+    rows = get_conn().execute(
+        "SELECT yn, cm, plan_qty FROM bundle WHERE zdno=? AND cc=? AND zh=? "
+        "ORDER BY yn, cm", (zdno, int(cc), int(zh))).fetchall()
+    return [{"yn": r[0] or "", "cm": r[1] or "", "qty": int(r[2] or 0)} for r in rows]
+
+
+def get_zdno_summary(zdno, cc=None):
+    """定单总览：共几扎、共多少件、有哪些颜色。
+
+    按 cc（车间层）统计 —— 同一定单可能跨层生产（实库 52/10295 个定单跨层），
+    工人在第几层就看到第几层的总量。
+    """
+    conn = get_conn()
+    if cc is None:
+        row = conn.execute("SELECT MIN(cc) FROM bundle WHERE zdno=?", (zdno,)).fetchone()
+        cc = row[0] if row else None
+    if cc is None:
+        return {"cc": None, "zh_count": 0, "qty_total": 0, "colors": []}
+    n = conn.execute("SELECT COUNT(DISTINCT zh) FROM bundle WHERE zdno=? AND cc=?",
+                     (zdno, int(cc))).fetchone()[0]
+    qty = conn.execute("SELECT COALESCE(SUM(plan_qty),0) FROM bundle WHERE zdno=? AND cc=?",
+                       (zdno, int(cc))).fetchone()[0]
+    colors = [r[0] for r in conn.execute(
+        "SELECT DISTINCT yn FROM bundle WHERE zdno=? AND cc=? AND yn<>'' ORDER BY yn",
+        (zdno, int(cc)))]
+    # 哪些扎已经报满，方便工人/班组长看进度
+    return {"cc": int(cc), "zh_count": int(n or 0), "qty_total": int(qty or 0),
+            "colors": colors}
+
+
 def get_processes(zdno):
     """该定单可做的工序列表（gx 已在同步时限定 1~18）"""
     rows = get_conn().execute(

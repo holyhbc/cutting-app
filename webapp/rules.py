@@ -3,7 +3,8 @@
 
 集中放在这里，避免两边算出不一样的结果。
 """
-from db import get_conn, get_plan_qty, get_reported_qty, get_reported_by_employee
+from db import (get_conn, get_plan_qty, get_reported_qty, get_reported_by_employee,
+               get_bundle_colors, get_zdno_summary)
 
 # 一次报工的数量上限，防止误填把手数当件数
 MAX_SINGLE_REPORT = 100000
@@ -101,8 +102,10 @@ def employee_change_limit(zdno, cc, zh, gx, ygno):
 
 
 def bundle_view(zdno, cc, zh):
-    """一扎的完整视图：应做数 + 每道工序的已报/剩余/单价。"""
+    """一扎的完整视图：颜色/本扎应做 + 定单总览 + 每道工序的已报/剩余/单价。"""
     plan = get_plan_qty(zdno, cc, zh)
+    colors = get_bundle_colors(zdno, cc, zh)
+    summary = get_zdno_summary(zdno, cc)
     procs = []
     for p in get_conn().execute(
             "SELECT gx, gxname, dj FROM process WHERE zdno=? ORDER BY gx", (zdno,)):
@@ -114,4 +117,9 @@ def bundle_view(zdno, cc, zh):
             "remain": max(0, plan - reported),
             "done": reported >= plan and plan > 0,
         })
-    return {"plan_qty": plan, "processes": procs}
+    return {
+        "plan_qty": plan,
+        "colors": colors,
+        "summary": summary,
+        "processes": procs,
+    }

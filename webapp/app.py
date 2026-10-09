@@ -57,6 +57,14 @@ h2{font-size:17px;margin:0 0 12px}
 .kv .k{color:#888;flex:0 0 auto}
 .kv .v{font-weight:600;flex:1 1 auto;min-width:0;text-align:right;word-break:break-all}
 .big{font-size:30px;font-weight:700;color:#0a84ff}
+/* 定单总览条 */
+.total{margin-top:12px;padding:11px 13px;background:#f0f8ff;border-radius:10px;
+       display:flex;flex-wrap:wrap;align-items:baseline;gap:4px}
+.tk{font-size:13px;color:#666}
+.tv{font-size:19px;font-weight:700;color:#0a84ff;margin:0 2px 0 1px}
+.tu{font-size:13px;color:#666;margin-right:2px}
+.tdiv{color:#ccc;margin:0 4px}
+.tall{flex-basis:100%;font-size:12px;color:#888;margin-top:5px}
 label{display:block;font-size:14px;color:#666;margin:14px 0 6px}
 input{width:100%;padding:12px;font-size:17px;border:1px solid #ddd;border-radius:10px;
       background:#fafafa}
@@ -124,6 +132,19 @@ def page_scan(smap, view, err="", done=""):
             f'<div class="ps">单价 {p["dj"]:.4f} 元/件</div></div>{pill}</div>')
 
     plan = view["plan_qty"]
+    # 本扎颜色/尺码：可能有多行（不同颜色×尺码）
+    colors = view.get("colors") or []
+    if colors:
+        ctext = "  ".join(
+            f"{c['yn']} {c['cm']}".strip() for c in colors)
+        cnote = f"（{len(colors)} 种配色）" if len(colors) > 1 else ""
+    else:
+        ctext, cnote = "—", ""
+    # 定单总览
+    sm = view.get("summary") or {}
+    zh_count = sm.get("zh_count", 0)
+    qty_total = sm.get("qty_total", 0)
+    all_colors = sm.get("colors") or []
     # 成功弹窗的正文要真的带上回执内容，否则工人只看到空的"报工成功"。
     ok_mask = ""
     if done:
@@ -154,7 +175,14 @@ def page_scan(smap, view, err="", done=""):
   <p class="sub">点工序会自动填好剩余数量，按需修改后提交。</p>
   <div class="kv"><span class="k">定单</span><span class="v">{esc(smap["zdno"])}</span></div>
   <div class="kv"><span class="k">扎号</span><span class="v">第 {smap["zh"]} 扎（{smap["cc"]} 层）</span></div>
-  <div class="kv"><span class="k">应做数量</span><span class="v big">{plan} 件</span></div>
+  <div class="kv"><span class="k">颜色尺码</span><span class="v">{esc(ctext)} {cnote}</span></div>
+  <div class="kv"><span class="k">本扎应做</span><span class="v big">{plan} 件</span></div>
+  <div class="total">
+    <div><span class="tk">本单共</span><span class="tv">{zh_count}</span><span class="tu">扎</span>
+         <span class="tdiv">·</span>
+         <span class="tv">{qty_total}</span><span class="tu">件</span></div>
+    {'<div class="tall">全单颜色：' + esc("、".join(all_colors[:8])) + ('等' if len(all_colors) > 8 else '') + '</div>' if all_colors else ''}
+  </div>
 </div>
 
 {"<div class='err'>" + esc(err) + "</div>" if err else ""}
