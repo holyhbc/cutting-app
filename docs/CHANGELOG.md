@@ -193,3 +193,64 @@ python3 -m py_compile zdno_edit.py && echo OK
 - `hbc-print` 默认库确认为 `ShintHrmDb-test`（旧文档写"默认生产库"有误）
 
 **核查全程只读，未对任何库执行写操作。**
+
+
+---
+
+## 2026-10-09 · 新增数据库升级脚本体系 + 二次核查更正
+
+### 新增 `sql/` 版本化升级脚本
+
+按用户要求「新增表/字段修改需保留脚本，便于日后升级生产库」：
+
+```
+sql/
+├── README.md                            使用说明 + 生产升级检查清单
+├── V001__create_jfzd2_detail.sql        裁剪明细表
+├── V002__create_jfzg_scan_map.sql       扫码短ID映射
+├── V003__create_jfzg_change.sql         改量审批
+└── apply_migrations.py                  执行器（幂等/记账/dry-run）
+```
+
+特性：
+- 幂等：`IF OBJECT_ID(...,'U') IS NULL`，重复执行安全
+- 记账：自动建 `hbc_schema_version`（version / script_name / **checksum** / applied_at / applied_by / db_name）
+- checksum 能检出「已发布脚本被改动」
+- 默认拒碰生产库，需 `--target prod --yes`
+- 全部 SQL Server 2000 兼容（无 `CREATE TABLE IF NOT EXISTS`、无 filtered index）
+
+**已在 `ShintHrmDb-test` 执行 V001~V003 全部成功**，重跑验证幂等（3/3 跳过）。
+**生产库未被触碰**（已验证无 `hbc_schema_version`）。
+
+### 二次核查更正了我上一轮的两个错误结论
+
+| 上一轮（错） | 更正后（对） |
+|---|---|
+| `jfdj.gx` 不可信 | ✅ `jfdj` 是**工序+单价权威表**，`gx`=定单内工序序号 1~18。上一轮用 `GROUP BY gx`+`MAX(gxname)` 判断，中文按字典序取到"扎口"，造成假象 |
+| `barcode` 语义未知、禁止使用 | ✅ 用户澄清：**1=扫条形码 / 0=系统手动输入**，语义明确可直接复用 |
+
+新增决策 **D-015 核查结论不得臆断，必须确认**，记录教训。
+
+### 上限规则实证（原 D-006 的"4.8倍"之谜解开）
+
+对每组 `(zdno, cc, zh, gx)`：已报 ÷ 该扎应做数 **倍率 = 1.00**（抽样全为 1.00）。
+
+- 未超 127300 组，超额 319 组（0.25%）
+- `jfgz.js` 总量是 `jfzd2.JS` 的 ~4.8 倍，是因为**每道工序都报整扎数量**，属正常
+- 正确上限：`SUM(jfgz.js) WHERE zdno,cc,zh,gx` ≤ `SUM(jfzd2.JS) WHERE zdno,cc,zh`
+  （**注意按颜色×尺码求和，不能取单行**）
+
+### 数据质量发现
+
+| 问题 | 规模 |
+|---|---|
+| `jfdj` 有 5 个定单 `gx` 为 NULL 或 >18 | `9712套装*` 各 639 行、`106024四六36-43`、`259819四六395-404` |
+| `jfgz` 存在 `cc`/`zh` 为 NULL | 如 `26手写` |
+| `jfdj.gxname` 写法不统一 | `印商标`/`印衣标`、`上安纶`/`上氨纶` 并存 → 工序名**不能等值匹配**（新增 D-014） |
+
+### 新增决策
+
+- **D-012** 明细表写入与保存解耦
+- **D-013** 工序与单价权威来源是 `jfdj`
+- **D-014** 工序名称不能等值匹配
+- **D-015** 核查结论不得臆断，必须确认
