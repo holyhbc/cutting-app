@@ -1960,6 +1960,56 @@ def build_number_assignments(start_num, end_num, mode, color_data):
     return assignments
 
 
+def load_bundle_color_data(zdno, cc=None):
+    """从 jfzd2 读取该定单每扎的颜色/尺码/数量。
+
+    为什么必须有这个函数：
+    界面的「尺码数据」表假设「同一颜色尺码下每扎件数相同」，
+    但真实数据是**一扎一色一码、数量各不相同**。
+    例如 269830套装1-22：扎1火山灰264、扎2奶茶棕406、扎3棕咖42、扎4黑灰250。
+    若用界面里手填的「每扎406」，44 个标签的件数和颜色全会印错。
+
+    返回 [{color, size, pieces, quantity}, ...]，每行 pieces=1 表示一扎，
+    顺序与扎号一致，可直接喂给 build_number_assignments。
+    """
+    try:
+        conn = get_conn(conn_str, timeout=10)
+        try:
+            cursor = conn.cursor()
+            if cc is None:
+                cursor.execute(
+                    "SELECT TOP 1 cc FROM jfzd2 WHERE zdno = ? ORDER BY cc", zdno)
+                row = cursor.fetchone()
+                if not row:
+                    raise ValueError(f"找不到 {zdno} 的裁剪明细")
+                cc = int(row[0])
+            cursor.execute(
+                "SELECT zh, ISNULL(YS,''), ISNULL(CM,''), ISNULL(SUM(JS),0) "
+                "FROM jfzd2 WHERE zdno = ? AND cc = ? "
+                "GROUP BY zh, YS, CM ORDER BY zh, YS, CM", zdno, cc)
+            rows = cursor.fetchall()
+        finally:
+            pass
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(f"读取 {zdno} 的裁剪明细失败：{e}")
+
+    if not rows:
+        raise ValueError(f"{zdno} 在第 {cc} 层没有裁剪明细，请先在工序数据里补录")
+
+    out = []
+    for zh, ys, cm, js in rows:
+        out.append({
+            "zh": int(zh),
+            "color": str(ys or ""),
+            "size": str(cm or "均码"),
+            "pieces": 1,
+            "quantity": int(js or 0),
+        })
+    return cc, out
+
+
 def build_barcode_items(zdno, zdid, start_num, end_num, mode, color_data, processes, style="", cc=None, qr_base_url=""):
     assignments = build_number_assignments(start_num, end_num, mode, color_data)
 
@@ -3409,6 +3459,11 @@ class App:
         self.add_btn.pack(side='left', padx=3)
         self.copy_row_btn = ttk.Button(self.add_btn_frame, text="📋 复制上一行", command=self.copy_last_size_row, width=15)
         self.copy_row_btn.pack(side='left', padx=3)
+        # 从裁剪明细(jfzd2)自动读取每扎的颜色/尺码/数量。
+        # 真实数据是一扎一色一码、数量各异，手填极易出错，必须提供自动读取。
+        self.load_bundle_btn = ttk.Button(self.add_btn_frame, text="📥 从数据库读取",
+                                         command=self.load_bundle_from_db, width=16)
+        self.load_bundle_btn.pack(side='left', padx=3)
         
         self.summary_hint_var = tk.StringVar(value="")
         self.summary_hint_label = ttk.Label(self.scrollable_frame, textvariable=self.summary_hint_var, 
@@ -3945,6 +4000,62 @@ class App:
         })
         self.update_stockin_btn_state()
     
+    def load_bundle_from_db(self):
+        """按定单号从 jfzd2 读取每扎的颜色/尺码/数量，填进尺码表。
+
+        每扎一行，pieces=1。读取后会同步开始/结束编号，
+        避免「件数按扎各不相同却被印成同一个数」。
+        """
+        # 界面上是「定单前缀 + 起止编号」，拼出完整 ZDNO
+        prefix = self.new_zdno_prefix_var.get().strip()
+        if not prefix:
+            messagebox.showwarning("提示", "请先填写定单号前缀")
+            return
+        zdno = f"{prefix}{self.start_num_var.get().strip()}-{self.end_num_var.get().strip()}"
+        try:
+            cc, rows = load_bundle_color_data(zdno)
+        except Exception as e:
+            messagebox.showerror("读取失败", str(e))
+            return
+
+        if not rows:
+            messagebox.showwarning("提示", f"{zdno} 没有裁剪明细")
+            return
+
+        # 重建尺码表
+        for row in list(self.size_rows):
+            try:
+                row['frame'].destroy()
+            except Exception:
+                pass
+        self.size_rows = []
+        for r in rows:
+            self._create_size_row(r['size'], r['color'], str(r['quantity']))
+            last = self.size_rows[-1]
+            last['pieces'].delete(0, 'end')
+            last['pieces'].insert(0, '1')
+
+        # 同步编号范围：每扎一行，起止编号应对应实际扎号
+        real_zhs = [r.get("zh") for r in rows if r.get("zh") is not None] \
+            or list(range(1, len(rows) + 1))
+        try:
+            self.start_num_var.set(str(real_zhs[0]))
+            self.end_num_var.set(str(real_zhs[-1]))
+        except Exception:
+            pass
+
+        self.update_header()
+        self.update_summary()
+        self.status_var.set(
+            f"✅ 已读取 {zdno} 第{cc}层共 {len(rows)} 扎的明细")
+        messagebox.showinfo(
+            "读取成功",
+            f"定单 {zdno}（第{cc}层）\n共 {len(rows)} 扎\n\n"
+            + "\n".join(f"  扎{i+1:<3} {r['color']}  {r['size']}  {r['quantity']} 件"
+                        for i, r in enumerate(rows[:12]))
+            + ("\n  …" if len(rows) > 12 else "")
+            + "\n\n每扎一行，请确认无误后再生成条码。")
+
     def add_size_row(self):
         main_color = self.color_var.get().strip()
         main_qty = self.qty_var.get().strip()
