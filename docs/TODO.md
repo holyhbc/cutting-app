@@ -15,15 +15,18 @@
   - [x] 查明 `jfgz.barcode` / `gzdate` / `jfzd2` 真实语义 → **见 CURRENT_STATE 第三节**
   - [ ] 🆕 请用户在测试库创建 `jfzd2_detail`（唯一缺表）
 - [ ] 0.3 确认扫码枪型号是否支持 14 位 Code128
-- [ ] 0.4 实现 `gen_short_id(zdno, cc, zh)`（sha1 → base32 → 8位大写）
-- [ ] 0.5 实现 `build_qr_url(short_id)`
-- [ ] 0.6 在 `draw_label()` 右侧空白处画 13mm 二维码
-  - ⚠️ **不改动** `make_full_barcode()`（保持 13 位）
-  - ⚠️ **不删**现有条码绘制代码
-- [ ] 0.7 单元测试：短 ID 稳定性 / 唯一性 / 长度 / 跨 CC 不碰撞
-- [ ] 0.8 生成样张 PDF，微信实扫验证
-- [ ] 0.9 跑一遍既有回归测试，确认没打破原有功能
-- [ ] 0.10 **commit**
+- [x] 0.4 实现 `gen_short_id(zdno, cc, zh)`（sha1 → base32 → 8位大写）✅
+- [x] 0.5 实现 `build_qr_url(short_id)` ✅
+- [x] 0.6 在 `draw_label()` **左下角**画 13mm 二维码 ✅
+  - ✅ **未改动** `make_full_barcode()`（仍 13 位）
+  - ✅ 标题/工序名自动右移 15mm 避让，条码仍居中不变
+  - ✅ 新增配置 `label_qr_enabled`(默认 False) / `label_qr_size_mm` / `label_qr_base_url`
+- [x] 0.7 单元测试 ✅ 稳定性/区分度/跨CC/参数校验/**20万组零碰撞**/URL拼接
+- [x] 0.8 样张 PDF 生成 + **机器解码验证** ✅ 38/38 全部解出且内容逐个正确
+- [x] 0.9 回归测试 ✅ **关码状态 451 万像素与基线完全一致**
+- [x] 0.10 **commit**
+- [ ] 0.11 🆕 人工用**微信实扫**样张确认（机器解码已通过，需现场确认）
+- [ ] 0.12 🆕 定单跨车间时（52/10295 个）需要界面指定 CC —— 阶段 1 补
 
 **锚点位置**：`hbc-print-v7.7.4-多颜色完整优化版.py:1805` `make_full_barcode()`，`create_barcode_pdf()` 内 `draw_label()`
 
@@ -37,7 +40,13 @@
 - [ ] Q4 数量上限基准字段？（`jfzd2.JS` 997万 vs `jfgz.js` 4808万，差 4.8 倍）
 - [ ] Q5 工序编号以 `jfdjgxk`(48条) 为准？
 
-**阶段 0（标签二维码）不受以上阻塞，可立即开工。**
+**以上均已由用户澄清解决，见 DECISIONS.md。**
+
+### ✅ 阶段 0 代码已完成（待人工验样）
+
+- 二维码默认**关闭**，需在配置里开 `label_qr_enabled` 并填 `label_qr_base_url`
+- 跨车间定单（0.5%）暂不出码，阶段 1 补 CC 选择器
+- 开启方法见 `docs/CURRENT_STATE.md` 第六节
 
 ## 阶段 1 · VPS 扫码页（不连生产库）
 

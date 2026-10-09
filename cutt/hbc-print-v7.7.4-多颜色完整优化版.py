@@ -1720,6 +1720,15 @@ DEFAULT_BARCODE_CONFIG = {
     "summary_qr_enabled": True,
     "summary_qr_size_mm": 25.0,
     "summary_qr_gap_mm": 3.0,
+    # ===== 标签二维码（阶段 0）=====
+    # 扫标签左下角的二维码进入报工页；与右侧条码并存，互不影响。
+    # 默认关闭：确认扫码枪与标签纸尺寸无误后再开启。
+    "label_qr_enabled": False,
+    "label_qr_size_mm": 13.0,
+    # 留空则不画二维码（避免印出扫不出用的码）。
+    # 必须是 http(s) 地址，微信才能按网页打开。
+    "label_qr_base_url": "",
+
     # 二维码必须是 http(s) 地址，微信才能按网页打开。
     # 留空时自动使用本机局域网IP，例如 http://192.168.0.100:8765
     "summary_qr_base_url": "https://cut.holyhbc.eu.org",
@@ -1807,6 +1816,84 @@ def make_full_barcode(zdid, number, gx):
     return body + make_barcode_check_digit(body)
 
 
+# ==================== 标签二维码（阶段 0）====================
+# 扫码粒度是「一扎」(ZDNO + CC + ZH)，不含工序——工序由工人扫码后自选。
+# CC 必须参与标识：实库存在 59 组 (ZDNO, ZH) 在不同 CC 下重复，省略会张冠李戴。
+# 详见 docs/DECISIONS.md D-001 / D-002。
+
+_BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+
+
+def gen_short_id(zdno, cc, zh):
+    """把 (定单, 车间层, 扎号) 压成 8 位大写短 ID，用作二维码内容。
+
+    - 无业务含义，纯索引；真正的对应关系存 jfzg_scan_map 表
+    - 40bit 空间（约 1.1e12），按生日问题约 200 万条才有 50% 碰撞；
+      服务端建唯一索引兜底（见 sql/V002__create_jfzg_scan_map.sql）
+    - 参数顺序固定为 (zdno, cc, zh)，cc 不能省
+    """
+    if zdno is None or cc is None or zh is None:
+        raise ValueError("生成短ID失败：zdno / cc / zh 都不能为空")
+    raw = f"{str(zdno).strip()}|{int(cc)}|{int(zh)}"
+    digest = hashlib.sha1(raw.encode("utf-8")).digest()[:5]   # 40 bit
+    value = int.from_bytes(digest, "big")
+    out = []
+    for _ in range(8):
+        out.append(_BASE32_ALPHABET[value & 31])
+        value >>= 5
+    return "".join(reversed(out))
+
+
+def build_qr_url(short_id, cfg):
+    """拼出二维码内容。必须是 http(s) 地址，微信才能按网页打开。"""
+    base = str((cfg or {}).get("label_qr_base_url", "") or "").strip().rstrip("/")
+    if not base:
+        return ""
+    return f"{base}/s/{short_id}"
+
+
+def _qr_opts():
+    """标签二维码开关参数，供 build_barcode_items 调用。
+
+    统一在这里判断，避免各处逻辑不一致导致「新建的标签有码、重打的模板没码」。
+    关闭时返回空 base_url，build_barcode_items 就不会生成二维码。
+    """
+    try:
+        cfg = load_barcode_config()
+    except Exception:
+        return {"cc": None, "qr_base_url": ""}
+    if not cfg.get("label_qr_enabled", False):
+        return {"cc": None, "qr_base_url": ""}
+    return {"cc": None, "qr_base_url": str(cfg.get("label_qr_base_url", "") or "")}
+
+
+def resolve_cc_for_zdno(zdno):
+    """查该定单的车间层 CC。CC 只存在于 jfzd2，jfzd 表里没有。
+
+    返回：
+        int   —— 该定单只有唯一 CC，可安全用于二维码
+        None  —— 查不到，或该定单跨多个 CC（实库 52/10295 个定单），
+                 此时必须由用户在界面上指定，不能猜
+    """
+    try:
+        conn = get_conn(conn_str, timeout=10)
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT DISTINCT cc FROM jfzd2 WHERE zdno = ? ORDER BY cc", zdno)
+            rows = [r[0] for r in cursor.fetchall() if r[0] is not None]
+        finally:
+            pass
+    except Exception as e:
+        print(f"查询定单 {zdno} 的车间层失败：{e}")
+        return None
+    if len(rows) == 1:
+        return int(rows[0])
+    if len(rows) > 1:
+        print(f"定单 {zdno} 跨多个车间层 {rows}，二维码需在界面上指定车间层后才能生成")
+    return None
+
+
 def get_zdid_by_zdno(zdno):
     conn = get_conn(conn_str, timeout=10)
     try:
@@ -1873,7 +1960,7 @@ def build_number_assignments(start_num, end_num, mode, color_data):
     return assignments
 
 
-def build_barcode_items(zdno, zdid, start_num, end_num, mode, color_data, processes, style=""):
+def build_barcode_items(zdno, zdid, start_num, end_num, mode, color_data, processes, style="", cc=None, qr_base_url=""):
     assignments = build_number_assignments(start_num, end_num, mode, color_data)
 
     # 汇总打印：一个编号范围只打印一份工序集合。
@@ -1883,7 +1970,23 @@ def build_barcode_items(zdno, zdid, start_num, end_num, mode, color_data, proces
 
     items = []
     print_date = datetime.now().strftime("%Y-%m-%d")
+    # 标签二维码：标识一扎 (zdno, cc, number)。cc 为空或跨车间时不出二维码，
+    # 宁可不出，也不出一个指错扎的码。
     for assignment in assignments:
+        short_id = ""
+        qr_text = ""
+        if qr_base_url:
+            zh_value = int(assignment["number"])
+            use_cc = cc if cc is not None else resolve_cc_for_zdno(zdno)
+            if use_cc is not None:
+                try:
+                    short_id = gen_short_id(zdno, use_cc, zh_value)
+                    qr_text = build_qr_url(short_id, {"label_qr_base_url": qr_base_url})
+                except Exception as e:
+                    print(f"生成标签二维码失败（zdno={zdno} cc={use_cc} zh={zh_value}）：{e}")
+                    short_id, qr_text = "", ""
+            else:
+                print(f"定单 {zdno} 未确定唯一车间层，跳过二维码（扎号 {zh_value}）")
         for proc in processes:
             items.append({
                 "zdno": zdno,
@@ -1907,7 +2010,10 @@ def build_barcode_items(zdno, zdid, start_num, end_num, mode, color_data, proces
                 ),
                 "qr_color_data": [dict(x) for x in color_data],
                 "print_date": print_date,
-                "barcode": make_full_barcode(zdid, assignment["number"], proc["gx"])
+                "barcode": make_full_barcode(zdid, assignment["number"], proc["gx"]),
+                "cc": cc,
+                "short_id": short_id,
+                "qr_text": qr_text,
             })
     return items
 
@@ -2391,10 +2497,21 @@ def create_barcode_pdf(items, template_name, cfg=None, output_path=None):
         title = f"{zdno_i}    工序 {gx}    {number} 号    {qty} 件"
         if size:
             title += f"    {size}"
-        fs = fit_font(title, label_w - 2 * pad, title_size, 5.2)
-        draw_mixed_string(x + pad, y + actual_row_h - 4.1 * mm, title, fs, align="left")
 
-        draw_mixed_string(x + pad, y + actual_row_h - 8.0 * mm, gxname[:18], body_size, align="left")
+        # 标签二维码：画在左下角，并把标题/工序名整体右移避让。
+        # 条码 34mm 居中后左右各留约 26mm，13mm 二维码只占左侧一小块，不会碰到条码。
+        qr_text = _safe_text(item.get("qr_text"))
+        qr_size = float(cfg.get("label_qr_size_mm", 13.0)) * mm
+        qr_reserved = 0.0
+        if qr_text and float(cfg.get("label_qr_size_mm", 13.0)) > 0:
+            qr_reserved = qr_size + 2 * mm
+
+        text_left = x + pad + qr_reserved
+        text_w = label_w - 2 * pad - qr_reserved
+        fs = fit_font(title, text_w, title_size, 5.2)
+        draw_mixed_string(text_left, y + actual_row_h - 4.1 * mm, title, fs, align="left")
+
+        draw_mixed_string(text_left, y + actual_row_h - 8.0 * mm, gxname[:18], body_size, align="left")
         if color:
             draw_mixed_string(x + label_w * 4 / 5 + 2 * mm , y + actual_row_h - 8.0 * mm, color[:8], body_size, align="right")
 
@@ -2418,6 +2535,21 @@ def create_barcode_pdf(items, template_name, cfg=None, output_path=None):
         if cfg.get("show_barcode_text", False):
             c.setFont("Helvetica", bc_text_size)
             c.drawCentredString(x + label_w / 2, y + 0.3 * mm, barcode_value)
+
+        # 标签二维码：左下角，与条码并存。画失败只提示，不影响条码打印。
+        if qr_text and qr_reserved > 0:
+            try:
+                qr = QrCodeWidget(qr_text)
+                bounds = qr.getBounds()
+                bw = bounds[2] - bounds[0]
+                bh = bounds[3] - bounds[1]
+                d = Drawing(qr_size, qr_size, transform=[
+                    qr_size / bw, 0, 0, qr_size / bh,
+                    -bounds[0] * qr_size / bw, -bounds[1] * qr_size / bh])
+                d.add(qr)
+                renderPDF.draw(d, c, x + pad, y + 0.8 * mm)
+            except Exception as e:
+                print(f"绘制标签二维码失败：{e}")
 
     grouped, order = {}, []
     for item in items:
@@ -4289,7 +4421,10 @@ class App:
         processes = get_print_processes(new_zdno)
         if not processes:
             raise ValueError(f"{new_zdno} 没有工序数据，无法生成条码")
-        items = build_barcode_items(new_zdno, zdid, start_num, end_num, mode, color_data, processes, self.style_var.get())
+        items = build_barcode_items(
+            new_zdno, zdid, start_num, end_num, mode, color_data, processes,
+            self.style_var.get(), **_qr_opts())
+
         return {
             "zdno": new_zdno,
             "template_zdno": template_zdno,
@@ -4338,12 +4473,12 @@ class App:
                 summary_color_data = [{"color": base_color, "size": "均码", "pieces": 1, "quantity": total_qty}]
                 detail_source_color_data = [dict(x) for x in source_color_data]
                 processes = get_print_processes(data["zdno"])
-                data["items"] = build_barcode_items(data["zdno"], data["zdid"], data["start_num"], data["end_num"], "汇总", summary_color_data, processes, data.get("style", ""))
+                data["items"] = build_barcode_items(data["zdno"], data["zdid"], data["start_num"], data["end_num"], "汇总", summary_color_data, processes, data.get("style", ""), **_qr_opts())
                 for _item in data["items"]:
                     _item["qr_color_data"] = detail_source_color_data
             else:
                 processes = get_print_processes(data["zdno"])
-                data["items"] = build_barcode_items(data["zdno"], data["zdid"], data["start_num"], data["end_num"], "明细", data.get("color_data", []), processes, data.get("style", ""))
+                data["items"] = build_barcode_items(data["zdno"], data["zdid"], data["start_num"], data["end_num"], "明细", data.get("color_data", []), processes, data.get("style", ""), **_qr_opts())
 
             try:
                 out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "条码打印文件")
