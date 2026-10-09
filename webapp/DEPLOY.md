@@ -65,7 +65,7 @@ chmod 600 /opt/scanapp/.sync_token
 ⚠️ 这个令牌**局域网电脑推送时也要用**，妥善保存，别提交进 git。
 
 ---
-
+Zv1ASD8Qx5-Mmx3cuWhsfzReamlsrCGba02ZQlc1mqs
 ## 3. systemd 服务
 
 ```bash
@@ -139,6 +139,11 @@ server {
     location /.well-known/acme-challenge/ { root /var/www/html; }
 
     location / {
+        # ⚠️ 必须加：nginx 默认只允许 1m 请求体，
+        # 而全量快照推送是 22.7MB，不加会返回 413 Request Entity Too Large。
+        # 64m 与代码里的 MAX_SNAPSHOT_BYTES 一致。
+        client_max_body_size 64m;
+
         proxy_pass http://127.0.0.1:10080;
         proxy_http_version 1.1;
         proxy_set_header Host              $host;
@@ -249,6 +254,28 @@ python webapp\sync_snapshot.py --zdno "9951背心2024-1-19" --push https://cut.h
 > 没必要高频推；有变化时手动推指定定单即可。
 
 ---
+
+## 7.1 排查：推送报 413
+
+```
+推送失败 HTTP 413: Request Entity Too Large
+```
+
+nginx 默认 `client_max_body_size` 只有 **1 MB**，全量快照是 **22.7 MB**，必被拦。
+在 `location /` 里加 `client_max_body_size 64m;` 后 `nginx -t && systemctl reload nginx`。
+
+（按单个定单推送时数据很小，不加也能过；但全量推送必须加。）
+
+### 排查：推送报 401
+
+`令牌不正确`。检查两处是否一致：
+- VPS：`~/cutting-app/webapp/.env` 里的 `SYNC_TOKEN`（改完要 `systemctl restart`）
+- 推送端：Windows 的 `SYNC_TOKEN`
+
+Windows 侧注意：`set` 在 PowerShell 里是 `Set-Variable` 的别名，**不设环境变量**。
+- PowerShell：`$env:SYNC_TOKEN = "xxx"`
+- cmd：`set SYNC_TOKEN=xxx`
+- 永久保存用 `setx`（但**只对新开的窗口生效**）
 
 ## 8. 打印标签：打开二维码
 
