@@ -2,6 +2,11 @@
 
 > 版本：v0.1（设计阶段，代码尚未实现二维码功能）
 > 最后更新：2026-10-09
+>
+> ⚠️ **本文档含已被实库核查证伪的假设**，改动前必读
+> [CURRENT_STATE.md 第三节](CURRENT_STATE.md)（5 处错误）与
+> [DECISIONS.md](DECISIONS.md) 中标 ⚠️ 的条目。
+> 特别是：`jfzd2` **没有工序字段**、`jfgz.barcode` **不可复用**。
 > 相关文档：[DECISIONS.md](DECISIONS.md) · [TODO.md](TODO.md) · [CURRENT_STATE.md](CURRENT_STATE.md)
 
 ---
@@ -31,11 +36,11 @@
 
 | 表 | 行数 | 用途 |
 |---|---|---|
-| `jfgz` | 128148 | **报工主表**，已有 `jfgzid` IDENTITY 主键、`barcode` 来源标记、`gzdate` 时间 |
+| `jfgz` | 128148 | **报工主表**，`jfgzid` 是 **bigint IDENTITY**。⚠️ `barcode` 已被历史占用，不可复用 |
 | `ygzl` | — | 员工花名册 |
 | `gzmonth` | 0 | 工资月表 |
 | `jfzd` | 3394 | 裁剪工单头 |
-| `jfzd2` | 52230 | 工序明细，含 `JS`（应做数） |
+| `jfzd2` | 52246 | ⚠️ **扎×颜色×尺码**，无工序字段，非"工序明细" |
 | `jfzd3` | 21329 | 汇总/派工（已改为只读） |
 | `jfdj` | 59760 | 定剪登记 |
 
@@ -188,13 +193,14 @@ CREATE TABLE jfzg_scan_map (
 CREATE TABLE jfzg_change (
     id          INT IDENTITY(1,1) NOT NULL PRIMARY KEY, -- 2000 无 SEQUENCE
     short_id    CHAR(8)     NOT NULL,
-    jfgzid      INT         NOT NULL,               -- 指向要改的那条报工
-    gx          VARCHAR(60) NOT NULL,               -- 工序
-    old_num     DECIMAL(12,2) NOT NULL,
-    new_num     DECIMAL(12,2) NOT NULL,
-    reason      VARCHAR(500) NULL,
-    apply_gh    VARCHAR(20)  NOT NULL,               -- 申请人工号
-    approve_gh  VARCHAR(20)  NULL,                   -- 审批人工号
+    jfgzid      BIGINT      NOT NULL,               -- 订正：jfgz.jfgzid 是 bigint
+    gx          SMALLINT    NOT NULL,               -- 订正：工序是 ID(1~18)，不是名称
+    gxname      NVARCHAR(30) NULL,                  -- 冗余存名称，方便审批页显示
+    old_num     INT         NOT NULL,               -- 订正：jfgz.js 是 int
+    new_num     INT         NOT NULL,
+    reason      NVARCHAR(500) NULL,
+    apply_gh    NVARCHAR(10) NOT NULL,               -- 申请人工号，对齐 ygzl.ygno
+    approve_gh  NVARCHAR(10) NULL,                   -- 审批人工号
     status      TINYINT     NOT NULL DEFAULT 0,     -- 0待审 1通过 2驳回
     created_at  DATETIME    NOT NULL,
     approve_at  DATETIME    NULL
@@ -203,9 +209,11 @@ CREATE TABLE jfzg_change (
 
 ### 5.3 复用 `jfgz` 的写法约定
 
-- 新增：`barcode = 1`（D-003）
-- 新增：`gzdate` 写完整 datetime（D-004）
-- 按 `jfgzid` 精确定位，**不做条件 UPDATE**
+- ⚠️ **不要写 `barcode`** —— 该字段已有 125333 行为 1，语义未知（见 CURRENT_STATE 错误 2）
+- ⚠️ **`gzdate` 是否写时分秒待确认** —— 历史 12.8 万条全为 `00:00:00`
+- `gx` 存**工序 ID**（smallint 1~18），名称从 `jfdjgxk.gxname` 取
+- `zdno` 是 `nvarchar(15)`，**实测最长 15 字符**，写入前必须校验长度
+- 按 `jfgzid`（bigint）精确定位，**不做条件 UPDATE**
 
 ---
 
@@ -255,7 +263,22 @@ CREATE TABLE jfzg_change (
 
 ## 9. 待确认问题
 
-1. **扫码枪型号** — 是否支持 14 位 Code128？决定 D-011 能否放宽
-2. **测试库表结构** — `ShintHrmDb-test` 是否已有 `jfzd2_detail`/`jfgz`/`ygzl`（待只读核查）
-3. **标签纸尺寸** — 决定 13mm 二维码能否与条码并排
-4. **主管操作方式** — 是否需要在 hbc-print 电脑上查看/审批，还是只有手机上
+### 🔴 阻塞设计（必须先答）
+
+1. **`jfgz.barcode` 真实语义是什么？** —— 决定能否复用 `jfgz` 报工
+2. **一扎对应哪些工序？工序来源表是哪个？** —— `jfzd2` 无工序字段，这是扫码页"选工序"的前提
+3. **`gzdate` 写完整时间还是只写日期？** —— 影响 12.8 万条历史一致性
+4. **数量上限拿什么做基准？** —— `jfzd2.JS`(997万) 与 `jfgz.js`(4808万) 差 4.8 倍
+
+### 🟡 不阻塞阶段 0
+
+5. **扫码枪型号** — 是否支持 14 位 Code128？（二维码走独立短 ID，不依赖条码格式）
+6. **标签纸尺寸** — 决定 13mm 二维码能否与条码并排
+7. **主管操作方式** — 是否需要在 hbc-print 电脑上审批，还是只有手机
+8. **工序编号以 `jfdjgxk`（48 条）为准可以吗？**
+
+### ✅ 已核查确认
+
+- 测试库 `ShintHrmDb-test` 结构与生产**完全一致**，唯一差异：缺 `jfzd2_detail`
+- `jfgz` / `ygzl` / `gzmonth` 均存在，`jfgz.jfgzid` 是 bigint IDENTITY
+- 跨 CC 重复的 `(ZDNO, ZH)` 恰好 59 组（D-002 成立）

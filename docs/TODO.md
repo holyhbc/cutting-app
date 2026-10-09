@@ -8,10 +8,12 @@
 ## 阶段 0 · 标签二维码（下一步做这个）
 
 - [ ] **0.1 先 commit 当前基线** ← 已完成，仓库已有首个 commit
-- [ ] 0.2 只读核查 `ShintHrmDb-test` 表结构
-  - [ ] 确认 `jfgz` / `ygzl` / `gzmonth` 存在
-  - [ ] 确认 `jfzd2_detail` 是否存在（不存在则幂等创建）
-  - [ ] 确认 `jfgz.jfgzid` 是 IDENTITY
+- [x] 0.2 只读核查 `ShintHrmDb-test` 表结构 ✅ 2026-10-09
+  - [x] `jfgz` / `ygzl` / `gzmonth` 均存在，两库结构一致
+  - [x] `jfzd2_detail` **测试库缺失** → 需幂等创建（待批准）
+  - [x] `jfgz.jfgzid` 是 **bigint IDENTITY**（注意不是 int）
+  - [x] 查明 `jfgz.barcode` / `gzdate` / `jfzd2` 真实语义 → **见 CURRENT_STATE 第三节**
+  - [ ] 🆕 请用户在测试库创建 `jfzd2_detail`（唯一缺表）
 - [ ] 0.3 确认扫码枪型号是否支持 14 位 Code128
 - [ ] 0.4 实现 `gen_short_id(zdno, cc, zh)`（sha1 → base32 → 8位大写）
 - [ ] 0.5 实现 `build_qr_url(short_id)`
@@ -26,6 +28,16 @@
 **锚点位置**：`hbc-print-v7.7.4-多颜色完整优化版.py:1805` `make_full_barcode()`，`create_barcode_pdf()` 内 `draw_label()`
 
 ---
+
+## 🆕 阶段 -1 · 需用户确认的设计前提（🔴 阻塞阶段 1+）
+
+- [ ] Q1 `jfgz.barcode` 真实语义？（1=125333行 / 0=2815行，已被占用，不能复用）
+- [ ] Q2 一扎对应哪些工序？工序来源表？（`jfzd2` 无 `gx` 字段）
+- [ ] Q3 `gzdate` 写完整时间还是只写日期？（历史全 `00:00:00`）
+- [ ] Q4 数量上限基准字段？（`jfzd2.JS` 997万 vs `jfgz.js` 4808万，差 4.8 倍）
+- [ ] Q5 工序编号以 `jfdjgxk`(48条) 为准？
+
+**阶段 0（标签二维码）不受以上阻塞，可立即开工。**
 
 ## 阶段 1 · VPS 扫码页（不连生产库）
 
