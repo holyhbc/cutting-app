@@ -236,6 +236,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, page_home(D.stats()), head_only=head_only)
             if path == "/health":
                 return self._json({"ok": True, "stats": D.stats()}, head_only=head_only)
+            if path == "/api/pending":
+                return self._handle_pending()
             if path == "/admin/pending":
                 return self._send(200, page_pending(D.list_pending(500)),
                                   head_only=head_only)
@@ -263,16 +265,73 @@ class Handler(BaseHTTPRequestHandler):
             D.log_audit("error", f"GET {path}: {e}", self.client_address[0])
             return self._send(500, f"<h1>500</h1><pre>{esc(e)}</pre>", head_only=head_only)
 
+    def _auth_sync(self):
+        """校验同步令牌。返回 True 表示通过。"""
+        if not SYNC_TOKEN:
+            D.log_audit("sync_denied", "服务端未配置 SYNC_TOKEN",
+                        self.client_address[0])
+            self._json({"ok": False, "msg": "服务端未配置 SYNC_TOKEN"}, 503)
+            return False
+        if self.headers.get("Authorization", "") != f"Bearer {SYNC_TOKEN}":
+            D.log_audit("sync_denied", "令牌不正确", self.client_address[0])
+            self._json({"ok": False, "msg": "令牌不正确"}, 401)
+            return False
+        return True
+
+    def _handle_pending(self):
+        """局域网同步器拉取待回写的报工。"""
+        if not self._auth_sync():
+            return
+        u = urlparse(self.path)
+        try:
+            lim = int(parse_qs(u.query).get("limit", ["200"])[0])
+            lim = max(1, min(lim, 2000))
+        except ValueError:
+            lim = 200
+        rows = D.list_pending(lim)
+        out = [{
+            "id": r["id"], "short_id": r["short_id"],
+            "zdno": r["zdno"], "cc": r["cc"], "zh": r["zh"],
+            "gx": r["gx"], "gxname": r["gxname"],
+            "ygno": r["ygno"], "ygname": r["ygname"],
+            "js": r["js"], "dj": r["dj"],
+            "gzdate": r["gzdate"], "created_at": r["created_at"],
+        } for r in rows]
+        self._json({"ok": True, "count": len(out), "reports": out})
+
+    def _handle_ack(self):
+        """同步器回报写入结果。"""
+        if not self._auth_sync():
+            return
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+            if n <= 0 or n > MAX_SNAPSHOT_BYTES:
+                return self._json({"ok": False, "msg": f"体积异常 {n}"}, 413)
+            payload = json.loads(self.rfile.read(n).decode("utf-8"))
+            done = fail = 0
+            for r in payload.get("results") or []:
+                rid = r.get("id")
+                if not rid:
+                    continue
+                if r.get("status") == "synced":
+                    D.mark_report(rid, "synced", jfgzid=r.get("jfgzid"))
+                    done += 1
+                else:
+                    D.mark_report(rid, "failed", err=r.get("err", ""))
+                    fail += 1
+            D.log_audit("ack", f"synced={done} failed={fail}",
+                        self.client_address[0])
+            return self._json({"ok": True, "synced": done, "failed": fail,
+                               "stats": D.stats()})
+        except Exception as e:
+            D.log_audit("ack_error", str(e), self.client_address[0])
+            return self._json({"ok": False, "msg": str(e)}, 400)
+
     def _handle_snapshot(self):
         """局域网同步器推送只读快照。需 Bearer 令牌，防止外部乱写。"""
         ip = self.client_address[0]
-        if not SYNC_TOKEN:
-            D.log_audit("snapshot_denied", "服务端未配置 SYNC_TOKEN", ip)
-            return self._json({"ok": False, "msg": "服务端未配置 SYNC_TOKEN"}, 503)
-        auth = self.headers.get("Authorization", "")
-        if auth != f"Bearer {SYNC_TOKEN}":
-            D.log_audit("snapshot_denied", "令牌不正确", ip)
-            return self._json({"ok": False, "msg": "令牌不正确"}, 401)
+        if not self._auth_sync():
+            return
         try:
             n = int(self.headers.get("Content-Length", 0))
             if n <= 0 or n > MAX_SNAPSHOT_BYTES:
@@ -292,6 +351,8 @@ class Handler(BaseHTTPRequestHandler):
         path = u.path.rstrip("/")
         if path == "/api/snapshot":
             return self._handle_snapshot()
+        if path == "/api/ack":
+            return self._handle_ack()
         if path != "/api/report":
             return self._send(404, "<h1>404</h1>")
         try:
