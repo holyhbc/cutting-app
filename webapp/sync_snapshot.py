@@ -17,10 +17,13 @@
 """
 import argparse
 import hashlib
+import json
 import os
 import sys
 import io
 import sqlite3
+import urllib.request
+import urllib.error
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8",
                               errors="replace", line_buffering=True)
@@ -144,15 +147,116 @@ def sync_baseline(cur, conn, zdno=None, recent=None, full=False):
     return len(rows)
 
 
+def push_to_server(target, token, zdno=None, replace=False, timeout=600):
+    """把快照 POST 到 VPS 的 /api/snapshot。
+
+    这是「局域网主动出站」的那一端（决策 D-009）：
+    VPS 从不连 SQL Server，由这台局域网电脑把只读快照推过去。
+    """
+    if not token:
+        raise SystemExit("推送必须提供 --token（或设置环境变量 SYNC_TOKEN）")
+    src = connect()
+    cur = src.cursor()
+
+    print(f"读取快照（源库 {os.environ.get('HBC_DB','ShintHrmDb-test')}，只读）…")
+    data = {
+        "replace": replace,
+        "ygzl": [{"ygno": r[0], "ygname": r[1], "ygout": int(r[2] or 0)}
+                 for r in cur.execute("SELECT ygno, ygname, ISNULL(ygout,0) FROM ygzl")],
+    }
+    n = build_scoped(cur, "bundle", zdno)
+    data["bundle"] = [r for r in n]
+    print(f"  扎快照 {len(n)} 行")
+
+    n = build_scoped(cur, "process", zdno)
+    data["process"] = [r for r in n]
+    print(f"  工序快照 {len(n)} 行")
+
+    n = build_scoped(cur, "baseline", zdno)
+    data["baseline"] = [r for r in n]
+    print(f"  历史基线 {len(n)} 行")
+
+    src.close()
+
+    # 短ID必须与服务端算法一致，两边独立实现互为校验
+    data["scan_map"] = [
+        {"short_id": gen_short_id(r["zdno"], r["cc"], r["zh"]),
+         "zdno": r["zdno"], "cc": r["cc"], "zh": r["zh"]}
+        for r in data["bundle"]]
+
+    body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+    print(f"\n推送到 {target}  （{len(body)/1024/1024:.2f} MB，replace={replace}）")
+    req = urllib.request.Request(
+        target.rstrip("/") + "/api/snapshot", data=body,
+        headers={"Content-Type": "application/json; charset=utf-8",
+                 "Authorization": f"Bearer {token}"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            print("服务端返回:", r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        print(f"推送失败 HTTP {e.code}: {e.read().decode('utf-8', 'replace')}", file=sys.stderr)
+        raise SystemExit(2)
+
+
+def build_scoped(cur, kind, zdno=None):
+    """按 --zdno 范围读取三类快照，返回 dict 列表。"""
+    out = []
+    if kind == "bundle":
+        if zdno:
+            rows = cur.execute(
+                "SELECT zdno, cc, zh, ISNULL(YS,''), ISNULL(CM,''), ISNULL(SUM(JS),0) "
+                "FROM jfzd2 WHERE zdno=? GROUP BY zdno, cc, zh, YS, CM", zdno).fetchall()
+        else:
+            rows = cur.execute(
+                "SELECT zdno, cc, zh, ISNULL(YS,''), ISNULL(CM,''), ISNULL(SUM(JS),0) "
+                "FROM jfzd2 GROUP BY zdno, cc, zh, YS, CM").fetchall()
+        out = [{"zdno": r[0], "cc": int(r[1]), "zh": int(r[2]), "yn": r[3],
+                "cm": r[4], "plan_qty": int(r[5] or 0)} for r in rows]
+    elif kind == "process":
+        if zdno:
+            rows = cur.execute(
+                "SELECT zdno, gx, ISNULL(gxname,''), ISNULL(dj,0) FROM jfdj "
+                "WHERE gx BETWEEN 1 AND 18 AND zdno=?", zdno).fetchall()
+        else:
+            rows = cur.execute(
+                "SELECT zdno, gx, ISNULL(gxname,''), ISNULL(dj,0) FROM jfdj "
+                "WHERE gx BETWEEN 1 AND 18").fetchall()
+        out = [{"zdno": r[0], "gx": int(r[1]), "gxname": r[2], "dj": float(r[3] or 0)}
+               for r in rows]
+    elif kind == "baseline":
+        if zdno:
+            rows = cur.execute(
+                "SELECT zdno, cc, zh, gx, ISNULL(SUM(js),0) FROM jfgz "
+                "WHERE cc IS NOT NULL AND zh IS NOT NULL AND zdno=? "
+                "GROUP BY zdno, cc, zh, gx", zdno).fetchall()
+        else:
+            rows = cur.execute(
+                "SELECT zdno, cc, zh, gx, ISNULL(SUM(js),0) FROM jfgz "
+                "WHERE cc IS NOT NULL AND zh IS NOT NULL "
+                "GROUP BY zdno, cc, zh, gx").fetchall()
+        out = [{"zdno": r[0], "cc": int(r[1]), "zh": int(r[2]), "gx": int(r[3]),
+                "reported_qty": int(r[4] or 0)} for r in rows]
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--zdno")
     ap.add_argument("--recent", type=int)
     ap.add_argument("--full", action="store_true")
     ap.add_argument("--print-qr", action="store_true", help="打印可用的二维码短ID")
+    ap.add_argument("--push", metavar="URL", help="把快照推送到 VPS，如 https://cut.holyhbc.eu.org")
+    ap.add_argument("--token", default=os.environ.get("SYNC_TOKEN", ""), help="推送令牌")
+    ap.add_argument("--replace", action="store_true", help="推送时先清空目标库（配合全量）")
     args = ap.parse_args()
+
+    if args.push:
+        # 推送模式：全量或按定单
+        push_to_server(args.push, args.token, zdno=args.zdno, replace=args.replace)
+        return
+
     if not (args.zdno or args.recent or args.full):
-        ap.error("必须指定 --zdno / --recent / --full 之一")
+        ap.error("必须指定 --zdno / --recent / --full / --push 之一")
 
     D.init_db()
     src = connect()

@@ -10,3 +10,4 @@ webapp/scan.db
 webapp/scan.db-wal
 webapp/scan.db-shm
 webapp/__pycache__/
+webapp/_vpsim.db*

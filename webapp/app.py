@@ -32,6 +32,9 @@ import db as D
 import rules as R
 
 PORT = int(os.environ.get("PORT", "8000"))
+# 局域网同步器推送快照时用的令牌。没配就拒绝该接口，不给未鉴权的写入口。
+SYNC_TOKEN = os.environ.get("SYNC_TOKEN", "")
+MAX_SNAPSHOT_BYTES = int(os.environ.get("MAX_SNAPSHOT_BYTES", str(64 * 1024 * 1024)))
 
 CSS = """
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -245,10 +248,36 @@ class Handler(BaseHTTPRequestHandler):
             D.log_audit("error", f"GET {path}: {e}", self.client_address[0])
             return self._send(500, f"<h1>500</h1><pre>{esc(e)}</pre>")
 
+    def _handle_snapshot(self):
+        """局域网同步器推送只读快照。需 Bearer 令牌，防止外部乱写。"""
+        ip = self.client_address[0]
+        if not SYNC_TOKEN:
+            D.log_audit("snapshot_denied", "服务端未配置 SYNC_TOKEN", ip)
+            return self._json({"ok": False, "msg": "服务端未配置 SYNC_TOKEN"}, 503)
+        auth = self.headers.get("Authorization", "")
+        if auth != f"Bearer {SYNC_TOKEN}":
+            D.log_audit("snapshot_denied", "令牌不正确", ip)
+            return self._json({"ok": False, "msg": "令牌不正确"}, 401)
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+            if n <= 0 or n > MAX_SNAPSHOT_BYTES:
+                return self._json({"ok": False, "msg": f"体积异常 {n}"}, 413)
+            payload = json.loads(self.rfile.read(n).decode("utf-8"))
+            replace = str(payload.get("replace", "")).lower() in ("1", "true", "yes")
+            counts = D.apply_snapshot(payload, replace=replace)
+            D.log_audit("snapshot", f"replace={replace} {counts}", ip)
+            return self._json({"ok": True, "applied": counts, "stats": D.stats()})
+        except Exception as e:
+            D.log_audit("snapshot_error", str(e), ip)
+            return self._json({"ok": False, "msg": str(e)}, 400)
+
     # ---------------------------------------------------------- POST
     def do_POST(self):
         u = urlparse(self.path)
-        if u.path.rstrip("/") != "/api/report":
+        path = u.path.rstrip("/")
+        if path == "/api/snapshot":
+            return self._handle_snapshot()
+        if path != "/api/report":
             return self._send(404, "<h1>404</h1>")
         try:
             n = int(self.headers.get("Content-Length", 0))

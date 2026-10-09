@@ -167,6 +167,79 @@ def mark_report(id_, status, jfgzid=None, err=None):
     conn.commit()
 
 
+def apply_snapshot(data, replace=False):
+    """接收局域网推送的快照并落库。
+
+    data 结构：
+        {"ygzl":[{ygno,ygname,ygout}],
+         "bundle":[{zdno,cc,zh,yn,cm,plan_qty}],
+         "process":[{zdno,gx,gxname,dj}],
+         "baseline":[{zdno,cc,zh,gx,reported_qty}]}
+
+    replace=True 时先清空再灌入（用于全量重灌，保证没有陈旧残留）。
+    默认只做 upsert（用于增量/按定单推送）。
+    返回写入行数。
+    """
+    stamp = now_str()
+    n = {}
+    with _write_lock:
+        conn = get_conn()
+        try:
+            if replace:
+                for t in ("ygzl", "bundle", "process", "report_baseline"):
+                    conn.execute(f"DELETE FROM {t}")
+                conn.commit()
+
+            rows = data.get("ygzl") or []
+            conn.executemany(
+                "INSERT INTO ygzl (ygno, ygname, ygout) VALUES (?,?,?) "
+                "ON CONFLICT(ygno) DO UPDATE SET ygname=excluded.ygname, "
+                "ygout=excluded.ygout",
+                [(r["ygno"], r.get("ygname", ""), int(r.get("ygout") or 0)) for r in rows])
+            n["ygzl"] = len(rows)
+
+            rows = data.get("bundle") or []
+            conn.executemany(
+                "INSERT INTO bundle (zdno, cc, zh, yn, cm, plan_qty) VALUES (?,?,?,?,?,?) "
+                "ON CONFLICT(zdno, cc, zh, yn, cm) DO UPDATE SET plan_qty=excluded.plan_qty",
+                [(r["zdno"], int(r["cc"]), int(r["zh"]), r.get("yn", ""),
+                  r.get("cm", ""), int(r.get("plan_qty") or 0)) for r in rows])
+            n["bundle"] = len(rows)
+
+            # 顺带登记扫码映射，保证标签上的短ID在服务端一定能查到
+            conn.executemany(
+                "INSERT INTO scan_map (short_id, zdno, cc, zh, created_at) VALUES (?,?,?,?,?) "
+                "ON CONFLICT(short_id) DO UPDATE SET zdno=excluded.zdno, "
+                "cc=excluded.cc, zh=excluded.zh",
+                [(r["short_id"], r["zdno"], int(r["cc"]), int(r["zh"]), stamp)
+                 for r in (data.get("scan_map") or [])])
+            n["scan_map"] = len(data.get("scan_map") or [])
+
+            rows = data.get("process") or []
+            conn.executemany(
+                "INSERT INTO process (zdno, gx, gxname, dj) VALUES (?,?,?,?) "
+                "ON CONFLICT(zdno, gx) DO UPDATE SET gxname=excluded.gxname, dj=excluded.dj",
+                [(r["zdno"], int(r["gx"]), r.get("gxname", ""), float(r.get("dj") or 0))
+                 for r in rows])
+            n["process"] = len(rows)
+
+            rows = data.get("baseline") or []
+            conn.executemany(
+                "INSERT INTO report_baseline (zdno, cc, zh, gx, reported_qty, updated_at) "
+                "VALUES (?,?,?,?,?,?) "
+                "ON CONFLICT(zdno, cc, zh, gx) DO UPDATE SET "
+                "reported_qty=excluded.reported_qty, updated_at=excluded.updated_at",
+                [(r["zdno"], int(r["cc"]), int(r["zh"]), int(r["gx"]),
+                  int(r.get("reported_qty") or 0), stamp) for r in rows])
+            n["baseline"] = len(rows)
+
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    return n
+
+
 def stats():
     conn = get_conn()
     one = lambda q: conn.execute(q).fetchone()[0]
