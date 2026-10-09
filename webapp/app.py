@@ -74,6 +74,24 @@ button.ghost{background:#f0f0f0;color:#333}
 .ps{font-size:12px;color:#888;margin-top:3px}
 .pill{font-size:12px;padding:4px 9px;border-radius:20px;background:#f0f0f0;color:#666;
       white-space:nowrap;flex:0 0 auto}
+.tip{margin-top:8px;font-size:13px;color:#999}
+.tip.ok{color:#28a745}
+.tip.warn{color:#d9534f}
+/* 弹窗 */
+.mask{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);
+      align-items:center;justify-content:center;z-index:99;padding:20px}
+.modal{background:#fff;border-radius:16px;padding:24px 20px;max-width:380px;
+       width:100%;text-align:center;box-shadow:0 8px 30px rgba(0,0,0,.25)}
+.mico{width:60px;height:60px;border-radius:50%;background:#28a745;color:#fff;
+      font-size:36px;line-height:60px;margin:0 auto 12px}
+.mico.warn{background:#d9534f}
+.mtitle{font-size:19px;font-weight:700;margin-bottom:10px}
+.mbody{font-size:15px;color:#444;line-height:1.7;margin-bottom:18px;
+       word-break:break-all}
+.mbtn{width:100%;padding:13px;font-size:16px;font-weight:600;border:0;
+      border-radius:11px;background:#0a84ff;color:#fff;margin-top:8px}
+.mbtn.ghostm{background:#f0f0f0;color:#333}
+#cam{width:100%;border-radius:11px;background:#000;aspect-ratio:1;object-fit:cover}
 .pill.ok{background:#e8f7ed;color:#28a745}
 .pill.no{background:#ffeaea;color:#d9534f}
 .err{background:#ffeaea;color:#c0392b;padding:12px;border-radius:10px;
@@ -100,11 +118,32 @@ def page_scan(smap, view, err="", done=""):
         pill = ('<span class="pill ok">已做完</span>' if p["done"] else
                 f'<span class="pill no">剩 {p["remain"]}</span>')
         rows.append(
-            f'<div class="{cls}" data-gx="{p["gx"]}">'
+            f'<div class="{cls}" data-gx="{p["gx"]}" data-remain="{p["remain"]}" '
+            f'data-name="{esc(p["gxname"])}">'
             f'<div><div class="pn">{p["gx"]}. {esc(p["gxname"])}</div>'
             f'<div class="ps">单价 {p["dj"]:.4f} 元/件</div></div>{pill}</div>')
 
     plan = view["plan_qty"]
+    # 成功弹窗的正文要真的带上回执内容，否则工人只看到空的"报工成功"。
+    ok_mask = ""
+    if done:
+        ok_mask = (
+            '<div class="mask" id="okmask"><div class="modal">'
+            '<div class="mico">✓</div>'
+            '<div class="mtitle">报工成功</div>'
+            f'<div class="mbody" id="okbody">{esc(done)}</div>'
+            '<button class="mbtn" onclick="closeOk()">继续报这扎</button>'
+            '<button class="mbtn ghostm" onclick="closeOk();openScan()">扫下一扎</button>'
+            '</div></div>')
+    err_mask = ""
+    if err and not done:
+        err_mask = (
+            '<div class="mask" id="errmask" style="display:flex"><div class="modal">'
+            '<div class="mico warn">!</div>'
+            '<div class="mtitle">提交失败</div>'
+            f'<div class="mbody">{esc(err)}</div>'
+            '<button class="mbtn" onclick="closeErr()">知道了</button>'
+            '</div></div>')
     return f"""<!doctype html><html lang="zh-CN"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -112,14 +151,13 @@ def page_scan(smap, view, err="", done=""):
 
 <div class="card">
   <h1>扫码报工</h1>
-  <p class="sub">选好工序后填数量提交，首次报工直接生效。</p>
+  <p class="sub">点工序会自动填好剩余数量，按需修改后提交。</p>
   <div class="kv"><span class="k">定单</span><span class="v">{esc(smap["zdno"])}</span></div>
   <div class="kv"><span class="k">扎号</span><span class="v">第 {smap["zh"]} 扎（{smap["cc"]} 层）</span></div>
   <div class="kv"><span class="k">应做数量</span><span class="v big">{plan} 件</span></div>
 </div>
 
 {"<div class='err'>" + esc(err) + "</div>" if err else ""}
-{"<div class='ok-msg'>" + esc(done) + "</div>" if done else ""}
 
 <form method="POST" action="/api/report" id="f">
 <input type="hidden" name="short_id" value="{esc(smap['short_id'])}">
@@ -143,8 +181,10 @@ def page_scan(smap, view, err="", done=""):
   <h2>3. 报工数量</h2>
   <label>件数（不是手数）</label>
   <input name="js" id="js" type="number" inputmode="numeric" min="1" step="1"
-         placeholder="例如 236" required>
+         placeholder="点上方工序会自动填入" required>
+  <div class="tip" id="tip">还没选工序</div>
   <button type="submit" id="btn">提交报工</button>
+  <button type="button" class="ghost" onclick="openScan()">📷 扫下一扎</button>
 </div>
 </form>
 
@@ -152,15 +192,163 @@ def page_scan(smap, view, err="", done=""):
   <p class="muted">标签二维码短ID：{esc(smap['short_id'])}</p>
 </div>
 </div>
+
+{ok_mask}
+{err_mask}
+
+<div class="mask" id="scanmask">
+  <div class="modal">
+    <div class="mtitle">扫下一扎</div>
+    <video id="cam" playsinline muted autoplay></video>
+    <div class="mbody" id="scanmsg">把摄像头对准标签左下角的二维码</div>
+    <button class="mbtn ghostm" onclick="closeScan()">取消</button>
+  </div>
+</div>
+
 <script>
+var okShown = {"true" if done else "false"};
+function closeOk(){{ document.getElementById('okmask').style.display='none'; }}
+function closeErr(){{ document.getElementById('errmask').style.display='none'; }}
+document.addEventListener('DOMContentLoaded', function(){{
+  if(okShown) closeOk();
+  var m=document.getElementById('errmask'); if(m) m.style.display='flex';
+}});
+
+// 点工序：选中 + 自动填剩余数（不自动提交，避免误触）
 document.querySelectorAll('#plist .proc').forEach(function(el){{
   el.onclick=function(){{
-    document.querySelectorAll('#plist .proc').forEach(x=>x.classList.remove('sel'));
+    if(el.classList.contains('done')){{
+      var t=document.getElementById('tip');
+      t.textContent='这道工序已做完，换一道吧';
+      t.className='tip warn';
+      return;
+    }}
+    document.querySelectorAll('#plist .proc').forEach(function(x){{x.classList.remove('sel');}});
     el.classList.add('sel');
-    document.getElementById('gx').value=el.dataset.gx;
-    var f=document.getElementById('f');
-    if(f.checkValidity()) f.submit();
-  }};}});
+    var gx=el.dataset.gx;
+    document.getElementById('gx').value=gx;
+    var remain=el.dataset.remain, nm=el.dataset.name;
+    var js=document.getElementById('js');
+    if(remain && parseInt(remain)>0){{ js.value=remain; }}
+    var t=document.getElementById('tip');
+    t.textContent='已选「'+nm+'」，剩余 '+remain+' 件';
+    t.className='tip ok';
+  }};
+}});
+
+// ---- 扫一扫 ----
+var stream=null, raf=null, det=null;
+function openScan(){{
+  var m=document.getElementById('scanmask');
+  m.style.display='flex';
+  var v=document.getElementById('cam');
+  var msg=document.getElementById('scanmsg');
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){{
+    msg.textContent='这个浏览器不支持摄像头，请用微信右上角「···」再扫一次';
+    return;
+  }}
+  navigator.mediaDevices.getUserMedia({{video:{{facingMode:'environment'}}}}).then(function(s){{
+    stream=s; v.srcObject=s;
+    if('BarcodeDetector' in window){{
+      det=new BarcodeDetector({{formats:['qr_code']}});
+      tick();
+    }} else {{
+      msg.textContent='此浏览器不支持直接识别，请点右上角「···」用微信扫一扫';
+    }}
+  }}).catch(function(e){{
+    msg.textContent='无法打开摄像头：'+e.message;
+  }});
+}}
+function tick(){{
+  var v=document.getElementById('cam');
+  if(!det) return;
+  det.detect(v).then(function(codes){{
+    if(codes && codes.length){{
+      var raw=codes[0].rawValue||'';
+      var m=raw.match(/[/]s[/]([A-Z2-7]{8})/);
+      if(m){{ location.href='/s/'+m[1]; return; }}
+      location.href=raw; return;
+    }}
+    raf=requestAnimationFrame(tick);
+  }}).catch(function(){{ raf=requestAnimationFrame(tick); }});
+}}
+function closeScan(){{
+  document.getElementById('scanmask').style.display='none';
+  if(stream){{ stream.getTracks().forEach(function(t){{t.stop();}}); stream=null; }}
+  if(raf) cancelAnimationFrame(raf);
+  var v=document.getElementById('cam'); if(v) v.srcObject=null;
+}}
+</script>
+</body></html>"""
+
+
+
+def page_notfound(sid=""):
+    """二维码无效页。要说清原因，别只丢一句'无效'让工人一头雾水。"""
+    return f"""<!doctype html><html lang="zh-CN"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>标签未同步</title><style>{CSS}</style></head><body><div class="wrap">
+<div class="card">
+  <div style="font-size:44px;text-align:center;line-height:1.2">🔄</div>
+  <h1 style="text-align:center">这个标签还没同步</h1>
+  <p class="sub" style="text-align:center">
+    标签是在扫码服务器上找的。如果刚印了新标签或新建了定单，<br>
+    需要班组长先同步一次才能扫。
+  </p>
+</div>
+<div class="card">
+  <h2>怎么办</h2>
+  <p class="sub" style="margin:0">
+    ① 先确认标签是不是刚印的<br>
+    ② 找班组长在电脑上点「同步到扫码服务器」<br>
+    ③ 同步完成后重新扫一次<br><br>
+    如果已经同步过还是打不开，请把这串编号报给班组长：
+  </p>
+  <div class="kv"><span class="k">标签编号</span>
+    <span class="v">{esc(sid) or '（无法识别）'}</span></div>
+</div>
+<div class="card">
+  <button onclick="history.back()">← 返回上一页</button>
+  <button class="ghost" onclick="openScan()">📷 直接扫一扫</button>
+</div>
+</div>
+<div class="mask" id="scanmask">
+  <div class="modal"><div class="mtitle">扫一扫</div>
+  <video id="cam" playsinline muted autoplay></video>
+  <div class="mbody" id="scanmsg">把摄像头对准标签左下角的二维码</div>
+  <button class="mbtn ghostm" onclick="closeScan()">取消</button></div>
+</div>
+<script>
+var stream=null,raf=null,det=null;
+function openScan(){{
+  var m=document.getElementById('scanmask'); m.style.display='flex';
+  var v=document.getElementById('cam'),msg=document.getElementById('scanmsg');
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){{
+    msg.textContent='这个浏览器不支持摄像头，请用微信右上角「···」再扫一次'; return; }}
+  navigator.mediaDevices.getUserMedia({{video:{{facingMode:'environment'}}}}).then(function(s){{
+    stream=s; v.srcObject=s;
+    if('BarcodeDetector' in window){{ det=new BarcodeDetector({{formats:['qr_code']}}); tick(); }}
+    else msg.textContent='此浏览器不支持直接识别，请点右上角「···」用微信扫一扫';
+  }}).catch(function(e){{ msg.textContent='无法打开摄像头：'+e.message; }});
+}}
+function tick(){{
+  var v=document.getElementById('cam'); if(!det) return;
+  det.detect(v).then(function(codes){{
+    if(codes&&codes.length){{
+      var raw=codes[0].rawValue||'';
+      var mm=raw.match(/[/]s[/]([A-Z2-7]{8})/);
+      location.href= mm?('/s/'+mm[1]) : raw; return;
+    }}
+    raf=requestAnimationFrame(tick);
+  }}).catch(function(){{ raf=requestAnimationFrame(tick); }});
+}}
+function closeScan(){{
+  document.getElementById('scanmask').style.display='none';
+  if(stream){{ stream.getTracks().forEach(function(t){{t.stop();}}); stream=null; }}
+  if(raf) cancelAnimationFrame(raf);
+  var v=document.getElementById('cam'); if(v) v.srcObject=null;
+}}
 </script>
 </body></html>"""
 
@@ -254,10 +442,7 @@ class Handler(BaseHTTPRequestHandler):
                 err = parse_qs(u.query).get("e", [""])[0]
                 smap = D.get_scan_map(sid)
                 if not smap:
-                    return self._send(404, page_scan(
-                        {"zdno": "?", "cc": 0, "zh": 0, "short_id": sid},
-                        {"plan_qty": 0, "processes": []},
-                        err="二维码无效或已过期，请重新打印标签"), head_only=head_only)
+                    return self._send(404, page_notfound(sid), head_only=head_only)
                 view = R.bundle_view(smap["zdno"], smap["cc"], smap["zh"])
                 return self._send(200, page_scan(smap, view, err=err), head_only=head_only)
             return self._send(404, "<h1>404</h1>", head_only=head_only)
@@ -364,10 +549,7 @@ class Handler(BaseHTTPRequestHandler):
 
             smap = D.get_scan_map(sid)
             if not smap:
-                return self._send(400, page_scan(
-                    {"zdno": "?", "cc": 0, "zh": 0, "short_id": sid},
-                    {"plan_qty": 0, "processes": []},
-                    err="二维码无效或已过期，请重新打印标签"))
+                return self._send(404, page_notfound(sid))
 
             view = R.bundle_view(smap["zdno"], smap["cc"], smap["zh"])
             try:
