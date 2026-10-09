@@ -4199,7 +4199,7 @@ class App:
             return False
         if not silent_ok:
             self.status_var.set(f"⏳ 正在同步 {zdno} 到扫码服务器…")
-            self.update_idletasks()
+            self.root.update_idletasks()
         try:
             n, msg = push_scan_map_for_zdno(zdno)
         except Exception as e:
@@ -4234,7 +4234,7 @@ class App:
             return True
         if count == 0:
             self.status_var.set(f"⏳ {zdno} 尚未同步，正在自动同步…")
-            self.update_idletasks()
+            self.root.update_idletasks()
             try:
                 n, msg = push_scan_map_for_zdno(zdno)
             except Exception as e:
