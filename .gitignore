@@ -5,3 +5,8 @@ __pycache__/
 # 打印输出目录（生成的 PDF 等产物，不入库）
 cutt/条码打印文件/
 *.pdf
+# 扫码报工本地暂存库（含运行期数据，不入库）
+webapp/scan.db
+webapp/scan.db-wal
+webapp/scan.db-shm
+webapp/__pycache__/
