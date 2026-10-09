@@ -1,7 +1,10 @@
 # 当前状态快照
 
-> 最后更新：2026-10-09（含二次实库核查，含用户澄清）
+> 最后更新：2026-10-09（含实库核查、用户澄清、GitHub 远程配置）
 > 用途：新会话接手时先读这份文件，5 秒内知道"现在能不能跑、下一步做什么"。
+>
+> **给接手的人**：远程仓库是 https://github.com/holyhbc/cutting-app ，
+> 提交后记得 `git push`。详见第二节。
 
 ---
 
@@ -19,15 +22,60 @@ python3 -m py_compile "hbc-print-v7.7.4-多颜色完整优化版.py" && echo OK
 
 ---
 
-## 二、Git 基线
+## 二、Git 仓库（唯一远程）
+
+**远程仓库：https://github.com/holyhbc/cutting-app**
+
+⚠️ **以后所有改动都提交推送到这个仓库**，不要再新建仓库或另找远程。
+
+```bash
+cd /mnt/g/hbc/opencode
+git add -A && git commit -m "..." && git push
+```
+
+| 项 | 值 |
+|---|---|
+| 远程 URL | `git@github.com:holyhbc/cutting-app.git`（SSH） |
+| 分支 | `main`（已设 upstream 跟踪） |
+| 可见性 | **public** |
+| 身份 | `holyhbc <holyhbc@sina.com>` |
+| SSH 密钥 | `~/.ssh/id_ed25519`（WSL 副本，权限 600） |
+
+> ⚠️ **SSH 密钥注意**：Windows 的 `C:\Users\holyhbc\.ssh\` 挂载到 WSL 后权限是 777，
+> OpenSSH 会报 `UNPROTECTED PRIVATE KEY FILE` 而拒绝使用。
+> 必须用 WSL 内的 `~/.ssh/id_ed25519` 副本。已配 `core.sshCommand` 自动指定，
+> 换机器或重建环境时记得重做这一步。
+
+### 提交历史
 
 ```
+244781c docs: VPS 部署步骤（Nginx + systemd + 证书 + 快照推送）
+9f8be9f feat: 快照推送接口，VPS 可独立运行（局域网主动出站）
+727c382 feat(阶段1): 扫码报工 Web 服务 + 快照同步器
+c0a4ff4 feat(阶段0): 标签二维码 —— 短ID生成、版面避让、机器解码验证
+5afaf08 docs: gzdate 决策确认（写完整 datetime），设计前提全部落定
+574c245 feat(sql): 新增版本化数据库升级脚本体系
 e0db133 docs: 实库核查结果，订正 5 处被证伪的假设
 6a74932 docs: 将 md 文档移入 docs/ 目录
 9d92957 baseline: hbc-print + zdno_edit + project docs
 ```
 
-身份 `holyhbc <holyhbc@sina.com>`；回滚 `git checkout -- <file>`
+### ⚠️ 公开仓库里已存在的信息（用户已知悉并确认）
+
+推送前已扫描，以下内容**公开可查**：
+
+- SQL Server 账号密码 `sa` / `1`（3 个源文件的默认值）
+- 内网地址 `192.168.0.73`
+- VPS 公网地址 `64.110.73.90` 与域名 `cut.holyhbc.eu.org`
+- 真实定单号（9951背心、251042平板、261069套装等）
+
+**这些已进入 GitHub 历史缓存**。想彻底清除必须**改密码 + 重写历史**，
+单改文件或删仓库无效。新增代码时不要再引入新的凭据。
+
+已确认**未**泄露：员工姓名、同步令牌、`scan.db`、PDF 产物。
+
+回滚：`git checkout -- <file>` / `git revert <commit>`
+
 
 ---
 

@@ -5,7 +5,9 @@
 
 ---
 
-## 阶段 0 · 标签二维码（下一步做这个）
+## ✅ 阶段 0 · 标签二维码 —— 代码完成，待人工验样
+
+**远程仓库**：https://github.com/holyhbc/cutting-app（提交后记得 push）
 
 - [ ] **0.1 先 commit 当前基线** ← 已完成，仓库已有首个 commit
 - [x] 0.2 只读核查 `ShintHrmDb-test` 表结构 ✅ 2026-10-09
@@ -141,3 +143,5 @@
 ### 文档 ✅
 - [x] DESIGN.md / DECISIONS.md / TODO.md / CHANGELOG.md / CURRENT_STATE.md
 - [x] Git 首个 commit 建立基线
+- [x] `webapp/DEPLOY.md` VPS 部署步骤
+- [x] 推送到 GitHub：https://github.com/holyhbc/cutting-app（public，main 分支）
