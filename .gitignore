@@ -13,3 +13,5 @@ webapp/__pycache__/
 webapp/_vpsim.db*
 webapp/_push2.db*
 webapp/_phase2.db*
+webapp/_testserver.py
+webapp/员工手机号模板.csv

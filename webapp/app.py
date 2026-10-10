@@ -82,6 +82,17 @@ button.ghost{background:#f0f0f0;color:#333}
 .ps{font-size:12px;color:#888;margin-top:3px}
 .pill{font-size:12px;padding:4px 9px;border-radius:20px;background:#f0f0f0;color:#666;
       white-space:nowrap;flex:0 0 auto}
+/* 登录态 */
+.who{background:linear-gradient(135deg,#e8f4ff,#f0f8ff);border:1px solid #cfe6ff}
+.whobar{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.wface{font-size:22px;flex:0 0 auto}
+.wname{font-size:17px;font-weight:700;white-space:nowrap;flex:0 0 auto}
+.wno{font-size:13px;color:#666;background:#fff;padding:2px 8px;border-radius:10px;
+     white-space:nowrap;flex:0 0 auto}
+.wbtn{margin-left:auto;padding:6px 13px;font-size:13px;border:0;border-radius:9px;
+      background:#fff;color:#0a84ff;border:1px solid #cfe6ff;flex:0 0 auto}
+.lbtn{width:100%;padding:13px;font-size:16px;font-weight:600;border:0;border-radius:11px;
+      background:#0a84ff;color:#fff;margin-top:11px}
 .tip{margin-top:8px;font-size:13px;color:#999}
 .tip.ok{color:#28a745}
 .tip.warn{color:#d9534f}
@@ -117,7 +128,7 @@ def esc(s):
     return html.escape(str(s if s is not None else ""), quote=True)
 
 
-def page_scan(smap, view, err="", done=""):
+def page_scan(smap, view, err="", done="", me=None, prefer_gx=None, token=""):
     """扫码落地页。工人只需：填工号 → 选工序 → 填数量 → 提交。"""
     procs = view["processes"]
     rows = []
@@ -130,6 +141,14 @@ def page_scan(smap, view, err="", done=""):
             f'data-name="{esc(p["gxname"])}">'
             f'<div><div class="pn">{p["gx"]}. {esc(p["gxname"])}</div>'
             f'<div class="ps">单价 {p["dj"]:.4f} 元/件</div></div>{pill}</div>')
+
+    # 记忆命中且那道还有余量 -> 自动选中
+    auto_gx = None
+    if prefer_gx is not None:
+        for p in procs:
+            if p["gx"] == prefer_gx and p["remain"] > 0:
+                auto_gx = prefer_gx
+                break
 
     plan = view["plan_qty"]
     # 本扎颜色/尺码：可能有多行（不同颜色×尺码）
@@ -194,11 +213,20 @@ def page_scan(smap, view, err="", done=""):
 <input type="hidden" name="zh" value="{smap['zh']}">
 <input type="hidden" name="gx" id="gx" value="">
 
-<div class="card">
-  <h2>1. 你的工号</h2>
-  <input name="ygno" id="ygno" placeholder="例如 A001" autocomplete="off"
-         inputmode="text" required>
-</div>
+{f'<div class="card who"><h2>1. 当前员工</h2>'
+ f'<div class="whobar"><span class="wface">👤</span>'
+ f'<span class="wname">{esc(me["ygname"])}</span>'
+ f'<span class="wno">{esc(me["ygno"])}</span>'
+ f'<button type="button" class="wbtn" onclick="logout()">切换</button></div>'
+ if me else
+ '<div class="card"><h2>1. 首次登录</h2>'
+ '<p class="sub" style="margin:0 0 10px">填「工号 或 手机号」都可以，'
+ '初始 PIN 是手机号后 4 位。</p>'
+ '<input id="account" placeholder="工号 A001 或 手机号" autocomplete="off" required>'
+ '<input id="pin" type="tel" inputmode="numeric" maxlength="6" placeholder="4位 PIN" required>'
+ '<button type="button" class="lbtn" onclick="doLogin()">登 录</button>'}
+<input type="hidden" name="ygno" id="ygno" value="{esc(me["ygno"]) if me else ""}">
+<input type="hidden" name="token" value="{esc(token)}">
 
 <div class="card">
   <h2>2. 选工序</h2>
@@ -242,6 +270,34 @@ document.addEventListener('DOMContentLoaded', function(){{
   var m=document.getElementById('errmask'); if(m) m.style.display='flex';
 }});
 
+// ---- 登录 ----
+function doLogin(){{
+  var acc=document.getElementById('account').value.trim();
+  var pin=document.getElementById('pin').value.trim();
+  if(!acc||!pin){{ alert('请填写工号或手机号，以及 PIN'); return; }}
+  fetch('/api/login',{{method:'POST',headers:{{'Content-Type':'application/json'}},
+        body:JSON.stringify({{account:acc,pin:pin}})}})
+    .then(function(r){{return r.json();}})
+    .then(function(d){{
+      if(d.ok){{ try{{ localStorage.setItem('scan_token', d.token); }}catch(e){{}} location.reload(); }}
+      else alert(d.msg||'登录失败');
+    }}).catch(function(){{ alert('网络错误'); }});
+}}
+function logout(){{
+  var t=(document.getElementById('token')||{{}}).value||localStorage.getItem('scan_token');
+  fetch('/api/logout',{{method:'POST',headers:{{'Content-Type':'application/json'}},
+        body:JSON.stringify({{token:t}})}})
+    .then(function(){{ try{{ localStorage.removeItem('scan_token'); }}catch(e){{}} location.href='/'; }});
+}}
+
+// 记忆命中：自动选中并预填剩余数
+var AUTO_GX = "{auto_gx if auto_gx else ""}";
+function autoPick(){{
+  if(!AUTO_GX) return;
+  var el=document.querySelector('#plist .proc[data-gx="'+AUTO_GX+'"]');
+  if(el && !el.classList.contains('done')) el.click();
+}}
+
 // 点工序：选中 + 自动填剩余数（不自动提交，避免误触）
 document.querySelectorAll('#plist .proc').forEach(function(el){{
   el.onclick=function(){{
@@ -263,6 +319,8 @@ document.querySelectorAll('#plist .proc').forEach(function(el){{
     t.className='tip ok';
   }};
 }});
+
+document.addEventListener('DOMContentLoaded', autoPick);
 
 // ---- 扫一扫 ----
 var stream=null, raf=null, det=null;
@@ -465,8 +523,14 @@ class Handler(BaseHTTPRequestHandler):
                 if not smap:
                     return self._json({"ok": False, "msg": "二维码无效"}, 404,
                                       head_only=head_only)
-                return self._json({"ok": True, "bundle": R.bundle_view(
-                    smap["zdno"], smap["cc"], smap["zh"]), "map": smap}, head_only=head_only)
+                tok = parse_qs(u.query).get("token", [""])[0]
+                me = R.whoami(tok)
+                view = R.bundle_view(smap["zdno"], smap["cc"], smap["zh"])
+                return self._json({"ok": True, "bundle": view, "map": smap,
+                                   "me": me,
+                                   "prefer_gx": R.recall_pref(
+                                       me["ygno"], smap["zdno"], smap["cc"], smap["zh"])
+                                   if me else None}, head_only=head_only)
             if path.startswith("/s/"):
                 sid = path.rsplit("/", 1)[-1]
                 err = parse_qs(u.query).get("e", [""])[0]
@@ -474,11 +538,39 @@ class Handler(BaseHTTPRequestHandler):
                 if not smap:
                     return self._send(404, page_notfound(sid), head_only=head_only)
                 view = R.bundle_view(smap["zdno"], smap["cc"], smap["zh"])
-                return self._send(200, page_scan(smap, view, err=err), head_only=head_only)
+                tok = parse_qs(u.query).get("t", [""])[0]
+                me = R.whoami(tok)
+                pref = R.recall_pref(me["ygno"], smap["zdno"], smap["cc"], smap["zh"]) if me else None
+                return self._send(200, page_scan(smap, view, err=err, me=me,
+                                                  prefer_gx=pref, token=tok),
+                                  head_only=head_only)
             return self._send(404, "<h1>404</h1>", head_only=head_only)
         except Exception as e:
             D.log_audit("error", f"GET {path}: {e}", self.client_address[0])
             return self._send(500, f"<h1>500</h1><pre>{esc(e)}</pre>", head_only=head_only)
+
+    def _handle_login(self):
+        """登录：工号 或 手机号 + PIN。"""
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+            data = json.loads(self.rfile.read(n).decode("utf-8")) if n else {}
+            ok, token, emp, must_change = R.login(data.get("account"), data.get("pin"))
+            D.log_audit("login", f"{emp['ygno']} {emp['ygname']}", self.client_address[0])
+            self._json({"ok": True, "token": token, "ygno": emp["ygno"],
+                        "ygname": emp["ygname"], "must_change": must_change})
+        except R.RuleError as e:
+            self._json({"ok": False, "msg": e.message, "code": e.code}, 401)
+        except Exception as e:
+            self._json({"ok": False, "msg": str(e)}, 400)
+
+    def _handle_logout(self):
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+            data = json.loads(self.rfile.read(n).decode("utf-8")) if n else {}
+            R.logout(data.get("token"))
+            self._json({"ok": True})
+        except Exception as e:
+            self._json({"ok": False, "msg": str(e)}, 400)
 
     def _auth_sync(self):
         """校验同步令牌。返回 True 表示通过。"""
@@ -580,6 +672,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_snapshot()
         if path == "/api/ack":
             return self._handle_ack()
+        if path == "/api/login":
+            return self._handle_login()
+        if path == "/api/logout":
+            return self._handle_logout()
         if path != "/api/report":
             return self._send(404, "<h1>404</h1>")
         try:
@@ -594,15 +690,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, page_notfound(sid))
 
             view = R.bundle_view(smap["zdno"], smap["cc"], smap["zh"])
+            tok = get("token")
+            me = R.whoami(tok)
             try:
-                emp = R.find_employee(get("ygno"))
+                # 已登录的以令牌为准，防冒名；未登录的退回工号校验（过渡期）
+                emp = me if me else R.find_employee(get("ygno"))
                 info = R.check_and_build_report(
                     sid, get("zdno") or smap["zdno"], get("cc") or smap["cc"],
                     get("zh") or smap["zh"], get("gx"), emp["ygno"], get("js"))
             except R.RuleError as e:
+                m2 = R.whoami(tok)
                 return self._send(400, page_scan(
                     smap, R.bundle_view(smap["zdno"], smap["cc"], smap["zh"]),
-                    err=e.message))
+                    err=e.message, me=m2, token=tok))
 
             res = D.create_report(
                 short_id=info["short_id"], zdno=info["zdno"], cc=info["cc"],
@@ -610,13 +710,19 @@ class Handler(BaseHTTPRequestHandler):
                 ygno=emp["ygno"], ygname=emp["ygname"], js=info["js"],
                 dj=info["dj"], ip=ip)
 
+            try:
+                R.remember_pref(emp["ygno"], info["zdno"], info["cc"], info["zh"], info["gx"])
+            except Exception as e:
+                print(f"记录工序偏好失败：{e}")
             view2 = R.bundle_view(smap["zdno"], smap["cc"], smap["zh"])
             if res["duplicated"]:
                 msg = "这条报工刚才已经提交过了，没有重复计入。"
             else:
                 msg = (f"已记录：{emp['ygname']} {info['gxname']} {info['js']} 件，"
                        f"金额 {info['js'] * info['dj']:.2f} 元。等待同步到服务器。")
-            return self._send(200, page_scan(smap, view2, done=msg))
+            pref2 = R.recall_pref(emp["ygno"], smap["zdno"], smap["cc"], smap["zh"])
+            return self._send(200, page_scan(smap, view2, done=msg, me=me,
+                                             prefer_gx=pref2, token=tok))
 
         except Exception as e:
             D.log_audit("error", f"POST: {e}", self.client_address[0])
