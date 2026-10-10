@@ -23,7 +23,7 @@ import sys
 import io
 import html
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote as url_quote
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8",
                               errors="replace", line_buffering=True)
@@ -608,6 +608,53 @@ def page_approve(me, changes, pending, token, tab="pending"):
     return _page_shell("改量审批", "".join(body))
 
 
+# ==================== 登录页 ====================
+
+def page_login(next_url="/", err=""):
+    """独立登录页。
+
+    报表、审批这些入口都要令牌，但没有登录页就永远拿不到令牌。
+    支持 ?next= 登录后跳回原页面。
+    """
+    emsg = (f'<div class="err" id="emsg" style="display:block">{esc(err)}</div>'
+            if err else '<div class="err" id="emsg" style="display:none"></div>')
+    body = f"""<div class="card">
+  <h1>🔐 登录</h1>
+  <p class="sub">填「工号 或 手机号」都可以，初始 PIN 是手机号后 4 位。</p>
+  {emsg}
+  <input id="account" placeholder="工号 C001 或 手机号" autocomplete="username" required>
+  <input id="pin" type="tel" inputmode="numeric" maxlength="6"
+         placeholder="4位 PIN" autocomplete="current-password" required>
+  <button type="button" class="lbtn" onclick="doLogin()">登 录</button>
+</div>
+<div class="card">
+  <p class="muted">没登记过？找班组长把你的工号和手机号录进来。<br>
+  忘了 PIN 找班组长重置。</p>
+</div>
+<script>
+var NEXT = "{esc(next_url)}";
+function doLogin(){{
+  var acc=document.getElementById('account').value.trim();
+  var pin=document.getElementById('pin').value.trim();
+  var m=document.getElementById('emsg');
+  if(!acc||!pin){{ m.style.display='block'; m.textContent='请填写工号或手机号，以及 PIN'; return; }}
+  m.style.display='none';
+  fetch('/api/login',{{method:'POST',headers:{{'Content-Type':'application/json'}},
+    body:JSON.stringify({{account:acc,pin:pin}})}})
+   .then(function(r){{return r.json();}})
+   .then(function(d){{
+     if(d.ok){{ location.href = NEXT + (NEXT.indexOf('?')>0?'&':'?') + 't=' + d.token; }}
+     else {{ m.style.display='block'; m.textContent = d.msg || '登录失败'; }}
+   }})
+   .catch(function(){{ m.style.display='block'; m.textContent='网络错误，请检查网络后重试'; }});
+}}
+document.getElementById('pin').addEventListener('keydown',function(e){{
+  if(e.key==='Enter') doLogin();
+}});
+</script>"""
+    return _page_shell("登录", body)
+
+
 # ==================== 阶段4 · 报表页（手机） ====================
 
 def page_report_home(me, meta, token, is_sup):
@@ -746,7 +793,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/approve":
                 me = R.whoami((parse_qs(u.query).get("t", [""])[0]) or "")
                 if not me:
-                    return self._send(404, page_notfound(""))
+                    return self._redirect_login()
                 if not R.is_supervisor(me["ygno"]):
                     return self._send(403, _page_shell("无权限",
                         '<div class="card"><h1>无权限</h1><p class="sub">'
@@ -759,6 +806,12 @@ class Handler(BaseHTTPRequestHandler):
                     D.count_pending_changes(), tok, tab), head_only=head_only)
             if path == "/change":
                 return self._handle_change_form()
+            if path == "/login":
+                nxt = parse_qs(u.query).get("next", ["/"])[0] or "/"
+                # 只允许站内跳转，防止开放重定向
+                if not nxt.startswith("/") or nxt.startswith("//"):
+                    nxt = "/"
+                return self._send(200, page_login(nxt), head_only=head_only)
             if path == "/report":
                 return self._handle_report_home()
             if path == "/report/mine":
@@ -1066,6 +1119,20 @@ class Handler(BaseHTTPRequestHandler):
             D.log_audit("ack_error", str(e), self.client_address[0])
             return self._json({"ok": False, "msg": str(e)}, 400)
 
+    def _redirect_login(self):
+        """未登录时跳登录页，并记住原来想去哪。
+
+        注意：绝不能返回 page_notfound —— 那是「标签未同步」页，
+        用来解释二维码打不开的原因，用在报表/审批入口上会让人一头雾水。
+        """
+        q = parse_qs(urlparse(self.path).query)
+        nxt = q.get("next", [""])[0] or urlparse(self.path).path
+        loc = f"/login?next={url_quote(nxt)}"
+        self.send_response(302)
+        self.send_header("Location", loc)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     # ---------------------------------------------------------- 报表
     def _report_user(self):
         """取登录态；没登录返回 None。"""
@@ -1075,7 +1142,7 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_report_home(self):
         me, tok = self._report_user()
         if not me:
-            return self._send(404, page_notfound(""))
+            return self._redirect_login()
         return self._send(200, page_report_home(
             me, D.report_meta(), tok, R.is_supervisor(me["ygno"])))
 
@@ -1087,7 +1154,7 @@ class Handler(BaseHTTPRequestHandler):
         """工人自助查询：只看自己的报工。"""
         me, tok = self._report_user()
         if not me:
-            return self._send(404, page_notfound(""))
+            return self._redirect_login()
         dfrom = self._q("from", _today_minus(30)) or _today_minus(30)
         dto = self._q("to", _today()) or _today()
         rows = D.report_mine(dfrom, dto, me["ygno"], 200)
@@ -1102,7 +1169,7 @@ class Handler(BaseHTTPRequestHandler):
         """定单进度（仅主管）。"""
         me, tok = self._report_user()
         if not me:
-            return self._send(404, page_notfound(""))
+            return self._redirect_login()
         if not R.is_supervisor(me["ygno"]):
             return self._send(403, _page_shell("无权限",
                 '<div class="card"><h1>无权限</h1><p class="sub">'
@@ -1122,7 +1189,7 @@ class Handler(BaseHTTPRequestHandler):
         """计件工资（口径 A：SUM(je)）。主管看全部，工人看自己。"""
         me, tok = self._report_user()
         if not me:
-            return self._send(404, page_notfound(""))
+            return self._redirect_login()
         is_sup = R.is_supervisor(me["ygno"])
         dfrom = self._q("from", "") or _today_minus(30)
         dto = self._q("to", "") or _today()

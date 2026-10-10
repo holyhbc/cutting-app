@@ -1,12 +1,10 @@
 {
-  "time": "2026-10-09 19:33:17",
-  "action": "写入明细",
-  "zdno": "269831四六6-9",
-  "table": "jfzd2_detail",
+  "time": "2026-10-10 19:16:41",
+  "action": "插入新工单",
+  "zdno": "269831四六10-13",
+  "table": "ALL",
   "before": {},
-  "detail_inserted": 4,
-  "detail_zdno": "269831套装6-9",
-  "detail_type": "套装",
-  "order_begin": 6,
-  "order_end": 9
+  "inserted": true,
+  "type_name": "套装",
+  "detail_zdno": "269831套装10-13"
 }
