@@ -105,6 +105,38 @@ echo "SYNC_TOKEN=$(cat /opt/scanapp/.sync_token)" | sudo tee /opt/scanapp/.env
 sudo chmod 600 /opt/scanapp/.env
 ```
 
+### 主管白名单 `SUPERVISORS`（D-007）
+
+`ygzl` 没有可靠的职务字段，主管身份只能靠环境变量指定。
+**不配这个变量，所有人都只是普通工人**（看不到改量审批页和全员工资）。
+
+```bash
+echo "SUPERVISORS=C001,A001,A003" | sudo tee -a /opt/scanapp/.env
+sudo systemctl restart cutapp.service
+```
+
+验证：
+
+```bash
+curl -s https://cut.holyhbc.eu.org/health | python3 -m json.tool
+```
+
+> ⚠️ 改了 `.env` **必须重启**才生效（systemd 只在启动时读一次）。
+
+### 建一个登录账号
+
+```bash
+# 工号必须在 ygzl 花名册里存在，否则登录会被拒（D-018）
+python3 /opt/scanapp/add_test_supervisor.py \
+  --ygno C001 --name 测试主管 --phone 13844445555 --pin 5555
+```
+
+脚本会检查花名册里有没有这个人，**没有就警告并告诉你先推快照**。
+PIN 只存哈希+盐，不存明文。重复执行幂等。
+
+> ⚠️ 手机号**不在**花名册同步范围内（`sync_employees` 只推 `ygno/ygname/ygout`），
+> 手机号只存在本地 `worker_login` 表，所以这一步必须在 VPS 上执行。
+
 > ⚠️ **注意上面 service 文件里的 `EnvironmentFile` 必须在 `ExecStart` 之前声明的位置不影响生效**，
 > systemd 同一段里顺序无关，但 `.env` 文件必须在服务启动**前**存在。
 
