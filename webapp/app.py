@@ -608,6 +608,95 @@ def page_approve(me, changes, pending, token, tab="pending"):
     return _page_shell("改量审批", "".join(body))
 
 
+# ==================== 阶段4 · 报表页（手机） ====================
+
+def page_report_home(me, meta, token, is_sup):
+    """报表首页：选类型 + 数据截至时间。"""
+    synced = D.get_sync_meta("jfgz_synced_at", "")
+    body = [f'<div class="card"><h1>📊 统计报表</h1>'
+            f'<p class="sub">{esc(me["ygname"])}（{esc(me["ygno"])}）</p>'
+            f'<div class="kv"><span class="k">报工记录</span>'
+            f'<span class="v">{meta["n"]:,}</span></div>'
+            f'<div class="kv"><span class="k">定单数</span>'
+            f'<span class="v">{meta["nzd"]:,}</span></div>'
+            f'<div class="kv"><span class="k">数据范围</span>'
+            f'<span class="v">{esc(meta["d0"] or "-")} ~ {esc(meta["d1"] or "-")}</span></div>'
+            f'<div class="kv"><span class="k">数据截至</span>'
+            f'<span class="v">{esc(synced or "尚未同步")}</span></div></div>']
+    if not meta["n"]:
+        body.append('<div class="card"><p class="muted">'
+                    '暂无报工数据，请班组长在电脑上运行「报表数据推送」。</p></div>')
+        return _page_shell("统计报表", "".join(body))
+
+    body.append(
+        f'<div class="card"><h2>查什么</h2>'
+        f'<a href="/report/mine?t={esc(token)}">'
+        f'<button>👤 我的报工</button></a>'
+        + (f'<a href="/report/progress?t={esc(token)}">'
+           f'<button>📈 定单进度</button></a>' if is_sup else "")
+        + (f'<a href="/report/wage?t={esc(token)}">'
+           f'<button>💰 计件工资</button></a>' if is_sup else "")
+        + '</div>')
+    body.append(f'<div class="card"><a href="/"><button class="ghost">← 返回首页</button></a></div>')
+    return _page_shell("统计报表", "".join(body))
+
+
+def page_report_table(title, sub, headers, rows, token, back, total=None):
+    """通用报表表格页（手机卡片式，不用宽表格）。"""
+    body = [f'<div class="card"><h1>{esc(title)}</h1>'
+            f'<p class="sub">{esc(sub)}</p>'
+            f'<a href="{esc(back)}?t={esc(token)}">'
+            f'<button class="ghost">← 返回</button></a></div>']
+    if not rows:
+        body.append('<div class="card"><p class="muted">没有数据</p></div>')
+        return _page_shell(title, "".join(body))
+    if total:
+        body.append(f'<div class="card"><p class="sub">合计</p>'
+                    f'<p style="font-size:20px;font-weight:700">{total}</p></div>')
+    cells = "".join(f"<th>{esc(h)}</th>" for h in headers)
+    trs = ""
+    for r in rows:
+        tds = "".join(f"<td>{esc(str(c))}</td>" for c in r)
+        trs += f"<tr>{tds}</tr>"
+    body.append(f'<div class="card" style="overflow-x:auto">'
+                f'<table><tr>{cells}</tr>{trs}</table></div>')
+    return _page_shell(title, "".join(body))
+
+
+def page_report_prompt(title, token, back, fields, is_sup):
+    """报表参数选择页（日期/工号），提交到对应报表页。"""
+    opts = "".join(f'<option value="{esc(v)}">{esc(t)}</option>' for v, t in fields)
+    body = [f'<div class="card"><h1>{esc(title)}</h1>'
+            f'<a href="{esc(back)}?t={esc(token)}">'
+            f'<button class="ghost">← 返回</button></a></div>',
+            '<div class="card"><form method="GET" action="' + esc(back) + '">'
+            f'<input type="hidden" name="t" value="{esc(token)}">'
+            '<p class="sub">开始日期</p>'
+            '<input type="date" name="from" value="__FROM__" style="width:100%">'
+            '<p class="sub" style="margin-top:10px">结束日期</p>'
+            '<input type="date" name="to" value="__TO__" style="width:100%">'
+            '<p class="sub" style="margin-top:10px">汇总维度</p>'
+            f'<select name="dim" style="width:100%">{opts}</select>'
+            + ('<p class="sub" style="margin-top:10px">工号（留空=全部）</p>'
+               '<input type="text" name="ygno" placeholder="如 A001" style="width:100%">'
+               if is_sup else "")
+            + '<button style="margin-top:14px;width:100%">查询</button>'
+            '</form></div>']
+    html = _page_shell(title, "".join(body))
+    return (html.replace("__FROM__", _today_minus(30))
+                .replace("__TO__", _today()))
+
+
+def _today():
+    import datetime
+    return datetime.date.today().isoformat()
+
+
+def _today_minus(n):
+    import datetime
+    return (datetime.date.today() - datetime.timedelta(days=n)).isoformat()
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "ScanReport/1.0"
 
@@ -670,6 +759,14 @@ class Handler(BaseHTTPRequestHandler):
                     D.count_pending_changes(), tok, tab), head_only=head_only)
             if path == "/change":
                 return self._handle_change_form()
+            if path == "/report":
+                return self._handle_report_home()
+            if path == "/report/mine":
+                return self._handle_report_mine()
+            if path == "/report/progress":
+                return self._handle_report_progress()
+            if path == "/report/wage":
+                return self._handle_report_wage()
             if path == "/admin/pending":
                 return self._send(200, page_pending(D.list_pending(500)),
                                   head_only=head_only)
@@ -969,6 +1066,86 @@ class Handler(BaseHTTPRequestHandler):
             D.log_audit("ack_error", str(e), self.client_address[0])
             return self._json({"ok": False, "msg": str(e)}, 400)
 
+    # ---------------------------------------------------------- 报表
+    def _report_user(self):
+        """取登录态；没登录返回 None。"""
+        tok = parse_qs(urlparse(self.path).query).get("t", [""])[0]
+        return R.whoami(tok), tok
+
+    def _handle_report_home(self):
+        me, tok = self._report_user()
+        if not me:
+            return self._send(404, page_notfound(""))
+        return self._send(200, page_report_home(
+            me, D.report_meta(), tok, R.is_supervisor(me["ygno"])))
+
+    def _q(self, key, default=""):
+        v = parse_qs(urlparse(self.path).query).get(key, [default])[0]
+        return (v or default).strip()
+
+    def _handle_report_mine(self):
+        """工人自助查询：只看自己的报工。"""
+        me, tok = self._report_user()
+        if not me:
+            return self._send(404, page_notfound(""))
+        dfrom = self._q("from", _today_minus(30)) or _today_minus(30)
+        dto = self._q("to", _today()) or _today()
+        rows = D.report_mine(dfrom, dto, me["ygno"], 200)
+        trs = [[r["gzdate"][:16], r["zdno"], r["gx"],
+                f'{r["cc"]}-{r["zh"]}', r["js"], f'{r["je"]:.2f}'] for r in rows]
+        sub = f"{dfrom} ~ {dto}　共 {len(rows)} 条"
+        return self._send(200, page_report_table(
+            "我的报工", sub, ["时间", "定单", "工序", "扎", "件数", "金额"],
+            trs, tok, "/report"))
+
+    def _handle_report_progress(self):
+        """定单进度（仅主管）。"""
+        me, tok = self._report_user()
+        if not me:
+            return self._send(404, page_notfound(""))
+        if not R.is_supervisor(me["ygno"]):
+            return self._send(403, _page_shell("无权限",
+                '<div class="card"><h1>无权限</h1><p class="sub">'
+                '只有主管可以查看定单进度。</p></div>'))
+        zdno = self._q("zdno")
+        if not zdno:
+            return self._send(200, page_report_prompt(
+                "定单进度", tok, "/report/progress",
+                [("zdno", "定单进度")], True))
+        rows = D.report_progress(zdno)
+        trs = [[r["gx"], r["recs"], r["pcs"], f'{r["amt"]:.2f}'] for r in rows]
+        sub = f"{zdno}　共 {len(rows)} 道工序"
+        return self._send(200, page_report_table(
+            "定单进度", sub, ["工序", "报工次数", "件数", "金额"], trs, tok, "/report"))
+
+    def _handle_report_wage(self):
+        """计件工资（口径 A：SUM(je)）。主管看全部，工人看自己。"""
+        me, tok = self._report_user()
+        if not me:
+            return self._send(404, page_notfound(""))
+        is_sup = R.is_supervisor(me["ygno"])
+        dfrom = self._q("from", "") or _today_minus(30)
+        dto = self._q("to", "") or _today()
+        dim = self._q("dim", "ygno") or "ygno"
+        ygno = self._q("ygno") or None
+        # 权限：非主管强制只看自己
+        if not is_sup:
+            ygno = me["ygno"]
+            dim = "ygno"
+        if dim not in ("zdno", "ygno", "gx", "day"):
+            dim = "ygno"
+        rows = D.report_group(dim, dfrom, dto, 500)
+        if ygno:
+            rows = [r for r in rows if r.get("k") == ygno]
+        trs = [[r["k"], r.get("kname") or "", r["recs"], r["pcs"], f'{r["amt"]:.2f}']
+               for r in rows]
+        total = f'共 {len(rows)} 组'
+        dimname = {"zdno": "定单", "ygno": "员工", "gx": "工序", "day": "日期"}[dim]
+        sub = f"{dfrom} ~ {dto}　按{dimname}　{total}"
+        return self._send(200, page_report_table(
+            "计件工资" if is_sup else "我的工资", sub,
+            [dimname, "姓名", "次数", "件数", "金额"], trs, tok, "/report"))
+
     def _handle_snapshot(self):
         """局域网同步器推送只读快照。需 Bearer 令牌，防止外部乱写。"""
         ip = self.client_address[0]
@@ -987,12 +1164,34 @@ class Handler(BaseHTTPRequestHandler):
             D.log_audit("snapshot_error", str(e), ip)
             return self._json({"ok": False, "msg": str(e)}, 400)
 
+    def _handle_reports_push(self):
+        """局域网同步器推送 jfgz 报工明细（阶段4报表数据源）。需 Bearer 令牌。"""
+        ip = self.client_address[0]
+        if not self._auth_sync():
+            return
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+            if n <= 0 or n > MAX_SNAPSHOT_BYTES:
+                return self._json({"ok": False, "msg": f"体积异常 {n}"}, 413)
+            payload = json.loads(self.rfile.read(n).decode("utf-8"))
+            rows = payload.get("rows", [])
+            total = int(payload.get("total", len(rows)))
+            max_id = int(payload.get("max_id", 0))
+            applied = D.apply_report_snapshot(rows, total, max_id)
+            D.log_audit("reports_push", f"{applied}", ip)
+            return self._json({"ok": True, "applied": applied, "stats": D.stats()})
+        except Exception as e:
+            D.log_audit("reports_push_error", str(e), ip)
+            return self._json({"ok": False, "msg": str(e)}, 400)
+
     # ---------------------------------------------------------- POST
     def do_POST(self):
         u = urlparse(self.path)
         path = u.path.rstrip("/")
         if path == "/api/snapshot":
             return self._handle_snapshot()
+        if path == "/api/reports/push":
+            return self._handle_reports_push()
         if path == "/api/ack":
             return self._handle_ack()
         if path == "/api/login":

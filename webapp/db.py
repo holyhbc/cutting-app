@@ -296,6 +296,7 @@ def stats():
         "ygzl": one("SELECT COUNT(*) FROM ygzl"),
         "worker_login": one("SELECT COUNT(*) FROM worker_login"),
         "pending_change": one("SELECT COUNT(*) FROM change_request WHERE status='pending'"),
+        "jfgz_report": one("SELECT COUNT(*) FROM jfgz_report"),
     }
 
 
@@ -400,3 +401,102 @@ def mark_change_synced(change_id, ok, err=""):
         conn.execute("UPDATE change_request SET synced=-1, approve_note=? WHERE id=?",
                      ((err or "")[:500], change_id))
     conn.commit()
+
+
+# ============================================================
+# 阶段4 · 报工统计报表
+# ============================================================
+
+def apply_report_snapshot(rows, total, max_id):
+    """接收局域网推送的 jfgz 报工明细并落库（全量覆盖）。
+
+    rows: [(jfgzid, gzdate, ygno, ygname, zdno, gx, cc, zh, js, dj, je, barcode)]
+    """
+    conn = get_conn()
+    conn.execute("DELETE FROM jfgz_report")
+    conn.executemany(
+        "INSERT OR REPLACE INTO jfgz_report"
+        " (jfgzid,gzdate,gzday,ygno,ygname,zdno,gx,cc,zh,js,dj,je,barcode)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [(r[0], str(r[1]), str(r[1])[:10], r[2], r[3], r[4], r[5],
+          r[6], r[7], r[8], float(r[9] or 0), float(r[10] or 0), int(r[11] or 1))
+         for r in rows])
+    for k, v in (("jfgz_rows", str(total)), ("jfgz_max_id", str(max_id)),
+                 ("jfgz_synced_at", now_str())):
+        conn.execute("INSERT OR REPLACE INTO sync_meta (key,value) VALUES (?,?)", (k, v))
+    conn.commit()
+    return {"rows": len(rows), "max_id": max_id}
+
+
+def get_sync_meta(key, default=""):
+    r = get_conn().execute("SELECT value FROM sync_meta WHERE key=?", (key,)).fetchone()
+    return r["value"] if r else default
+
+
+def report_meta():
+    r = get_conn().execute(
+        "SELECT COUNT(*) n, MIN(gzday) d0, MAX(gzday) d1,"
+        " COUNT(DISTINCT zdno) nzd, COUNT(DISTINCT ygno) nyg FROM jfgz_report").fetchone()
+    return dict(r)
+
+
+def report_group(dim, dfrom, dto, limit=20000):
+    """多维汇总：dim in (zdno, ygno, gx, day)。ygno 维度带姓名。"""
+    cols = {"zdno": "zdno", "ygno": "ygno", "gx": "gx", "day": "gzday"}
+    col = cols.get(dim, "zdno")
+    # 只有按员工分组时才有"姓名"可言，其他维度留空
+    kname = "MAX(ygname)" if dim == "ygno" else "''"
+    rows = get_conn().execute(
+        f"SELECT {col} k, {kname} kname, COUNT(*) recs, SUM(js) pcs, SUM(je) amt"
+        f" FROM jfgz_report WHERE gzday>=? AND gzday<?"
+        f" GROUP BY {col} ORDER BY pcs DESC LIMIT {int(limit)}",
+        (dfrom, dto)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def report_wage(dfrom, dto, ygno=None):
+    """计件工资（口径 A：直接 SUM(je)，和入库金额一致）。"""
+    sql = ("SELECT ygno, MAX(ygname) ygname, gx, COUNT(*) recs, SUM(js) pcs, SUM(je) amt"
+           " FROM jfgz_report WHERE gzday>=? AND gzday<?")
+    args = [dfrom, dto]
+    if ygno:
+        sql += " AND ygno=?"
+        args.append(ygno)
+    sql += " GROUP BY ygno, gx ORDER BY ygno, gx"
+    return [dict(r) for r in get_conn().execute(sql, args).fetchall()]
+
+
+def report_detail(dfrom, dto, zdno=None, ygno=None, gx=None, limit=300):
+    """报工明细（手机上只取最近 limit 条）。"""
+    sql = ("SELECT gzdate, ygno, ygname, zdno, gx, cc, zh, js, je"
+           " FROM jfgz_report WHERE gzday>=? AND gzday<?")
+    args = [dfrom, dto]
+    if zdno:
+        sql += " AND zdno=?"
+        args.append(zdno)
+    if ygno:
+        sql += " AND ygno=?"
+        args.append(ygno)
+    if gx is not None:
+        sql += " AND gx=?"
+        args.append(gx)
+    sql += " ORDER BY gzdate DESC, jfgzid DESC LIMIT ?"
+    args.append(int(limit))
+    return [dict(r) for r in get_conn().execute(sql, args).fetchall()]
+
+
+def report_progress(zdno):
+    """某定单的报工汇总（按工序）。"""
+    rows = get_conn().execute(
+        "SELECT gx, MAX(ygname) ygname, COUNT(*) recs, SUM(js) pcs, SUM(je) amt"
+        " FROM jfgz_report WHERE zdno=? GROUP BY gx ORDER BY gx", (zdno,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def report_mine(dfrom, dto, ygno, limit=100):
+    """某工人的报工明细（自助查询）。"""
+    rows = get_conn().execute(
+        "SELECT gzdate, zdno, gx, cc, zh, js, je FROM jfgz_report"
+        " WHERE ygno=? AND gzday>=? AND gzday<? ORDER BY gzdate DESC, jfgzid DESC"
+        " LIMIT ?", (ygno, dfrom, dto, int(limit))).fetchall()
+    return [dict(r) for r in rows]

@@ -200,3 +200,32 @@ CREATE TABLE IF NOT EXISTS audit (
     ip         TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS ix_audit_at ON audit (at);
+
+-- ---------------------------------------------------------------------
+-- 报工明细（阶段4 报表数据源，由局域网电脑从 SQL Server 推送）
+-- 只读副本：VPS 不连 SQL Server（D-009），报表全部基于这张表
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS jfgz_report (
+    jfgzid  INTEGER PRIMARY KEY,   -- 对齐 SQL Server，便于对账
+    gzdate  TEXT    NOT NULL,      -- 完整日期时间
+    gzday   TEXT    NOT NULL,      -- 日期部分 YYYY-MM-DD，聚合用
+    ygno    TEXT    NOT NULL,
+    ygname  TEXT    NOT NULL DEFAULT '',
+    zdno    TEXT    NOT NULL,
+    gx      INTEGER NOT NULL,
+    cc      INTEGER,
+    zh      INTEGER,
+    js      INTEGER NOT NULL,
+    dj      REAL    NOT NULL DEFAULT 0,
+    je      REAL    NOT NULL DEFAULT 0,
+    barcode INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS ix_rep_day  ON jfgz_report (gzday);
+CREATE INDEX IF NOT EXISTS ix_rep_ygno ON jfgz_report (ygno, gzday);
+CREATE INDEX IF NOT EXISTS ix_rep_zdno ON jfgz_report (zdno, gx);
+
+-- 同步水位（增量推送用）
+CREATE TABLE IF NOT EXISTS sync_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
