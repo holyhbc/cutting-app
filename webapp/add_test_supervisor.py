@@ -25,7 +25,31 @@ import secrets
 import sqlite3
 import sys
 
-DEFAULT_DB = os.environ.get("SCAN_DB", "/opt/scanapp/scan.db")
+DEFAULT_DB = os.environ.get("SCAN_DB", "")
+
+
+def find_db(explicit=""):
+    """定位 scan.db。
+
+    部署路径各人不同（有 /opt/scanapp，也有 /root/cutting-app/webapp），
+    写死路径必然对不上，所以按优先级自动找。
+    """
+    if explicit:
+        return explicit
+    if DEFAULT_DB:
+        return DEFAULT_DB
+    # 1) 脚本同级目录（绝大多数情况就是这个）
+    here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scan.db")
+    if os.path.exists(here):
+        return here
+    # 2) 常见部署路径兜底
+    for p in ("/opt/scanapp/scan.db",
+              "/root/cutting-app/webapp/scan.db",
+              os.path.expanduser("~/cutting-app/webapp/scan.db")):
+        if os.path.exists(p):
+            return p
+    # 3) 都没有就返回脚本同级，让下面的报错信息给出可执行的命令
+    return here
 
 
 def make_pin_hash(pin, salt=None):
@@ -45,13 +69,20 @@ def main():
     ap.add_argument("--name", required=True, help="姓名")
     ap.add_argument("--phone", required=True, help="手机号")
     ap.add_argument("--pin", required=True, help="初始 PIN（明文传入，只在本次用一次）")
-    ap.add_argument("--db-path", default=DEFAULT_DB)
+    ap.add_argument("--db-path", default=None,
+                    help="SQLite 路径（默认自动找脚本同级的 scan.db）")
     args = ap.parse_args()
 
-    if not os.path.exists(args.db_path):
-        raise SystemExit(f"找不到数据库：{args.db_path}")
+    db_path = find_db(args.db_path)
+    if not os.path.exists(db_path):
+        raise SystemExit(
+            f"找不到数据库：{db_path}\n"
+            f"请用 --db-path 指定实际路径，例如：\n"
+            f"  python3 add_test_supervisor.py --db-path /root/cutting-app/webapp/scan.db \\\n"
+            f"    --ygno C001 --name 测试主管 --phone 13844445555 --pin 5555")
+    print(f"数据库：{db_path}")
 
-    conn = sqlite3.connect(args.db_path)
+    conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     h, salt = make_pin_hash(args.pin)
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -85,13 +116,15 @@ def main():
         print(f"   手机号：{r['phone']}")
         print(f"   状态  ：{'启用' if r['active'] else '停用'}")
         print(f"   PIN   ：{args.pin}（只存哈希，不存明文）")
-        print(f"\n⚠️  还没生效！还需要两步：")
-        print(f"   1) 把 C001 加进主管白名单：")
-        print(f"      echo 'SUPERVISORS=C001,A001,A003' >> /opt/scanapp/.env")
+        print(f"\n⚠️  还没生效！还需要：")
+        print(f"   1) 把 {args.ygno} 加进主管白名单并重启服务：")
+        print(f"      # 按你实际的部署路径二选一")
+        print(f"      echo 'SUPERVISORS={args.ygno},A001,A003' | sudo tee -a \\")
+        print(f"        <你的.env路径>/.env")
         print(f"      systemctl restart cutapp.service")
-        print(f"   2) 从测试库推送花名册快照（让 ygzl 里有 C001）：")
-        print(f"      python G:\\hbc\\opencode\\webapp\\sync_snapshot.py \\")
-        print(f"        --conn <测试库连接串> --push https://cut.holyhbc.eu.org")
+        if not emp:
+            print(f"   2) 花名册里还没有 {args.ygno}，需要从测试库推一次快照：")
+            print(f"      python sync_snapshot.py --push https://cut.holyhbc.eu.org")
     finally:
         conn.close()
 

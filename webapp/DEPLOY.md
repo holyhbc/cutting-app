@@ -15,7 +15,7 @@
 │   生成含二维码的标签       │            │   └─> scanapp :10080     │
 │                          │            │                         │
 │ sync_snapshot.py 定时运行  │──HTTPS───>│ app.py                  │
-│   读 SQL Server(只读)     │  POST      │   └─> SQLite /opt/scanapp│
+│   读 SQL Server(只读)     │  POST      │   └─> SQLite /root/cutting-app/webapp│
 └──────────────────────────┘  /api/     │       /scan.db          │
                               snapshot  │                         │
                                          └─────────────────────────┘
@@ -31,25 +31,25 @@
 
 ## 1. VPS 上传代码
 
-在 VPS 上执行（假设部署到 `/opt/scanapp`）：
+在 VPS 上执行（**实际部署路径就是 `/root/cutting-app/webapp`**）：
 
 ```bash
-sudo mkdir -p /opt/scanapp
-sudo chown $USER:$USER /opt/scanapp
+sudo mkdir -p /root/cutting-app/webapp
+sudo chown $USER:$USER /root/cutting-app/webapp
 
 # 方式一：git（若 VPS 上有这份仓库）
-cd /opt/scanapp
+cd /root/cutting-app/webapp
 git clone <你的仓库地址> .
 
 # 方式二：直接拷贝 webapp 目录（只有 4 个 .py + 1 个 .sql，不需要仓库）
-scp -r webapp/{app.py,db.py,rules.py,schema.sql,sync_snapshot.py} user@64.110.73.90:/opt/scanapp/
+scp -r webapp/{app.py,db.py,rules.py,schema.sql,sync_snapshot.py} user@64.110.73.90:/root/cutting-app/webapp/
 ```
 
 > 只依赖 Python 3 标准库，**不需要 pip install 任何东西**。
 
 确认：
 ```bash
-cd /opt/scanapp && python3 -c "import app; print('OK')"
+cd /root/cutting-app/webapp && python3 -c "import app; print('OK')"
 ```
 
 ---
@@ -58,8 +58,8 @@ cd /opt/scanapp && python3 -c "import app; print('OK')"
 
 ```bash
 # 在 VPS 上生成，保存到权限 600 的文件
-python3 -c "import secrets; print(secrets.token_urlsafe(32))" | tee /opt/scanapp/.sync_token
-chmod 600 /opt/scanapp/.sync_token
+python3 -c "import secrets; print(secrets.token_urlsafe(32))" | tee /root/cutting-app/webapp/.sync_token
+chmod 600 /root/cutting-app/webapp/.sync_token
 ```
 
 ⚠️ 这个令牌**局域网电脑推送时也要用**，妥善保存，别提交进 git。
@@ -77,21 +77,21 @@ After=network.target
 [Service]
 Type=simple
 User=YOUR_USER
-WorkingDirectory=/opt/scanapp
+WorkingDirectory=/root/cutting-app/webapp
 Environment=PORT=10080
-Environment=SCAN_DB=/opt/scanapp/scan.db
+Environment=SCAN_DB=/root/cutting-app/webapp/scan.db
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/python3 /opt/scanapp/app.py
+ExecStart=/usr/bin/python3 /root/cutting-app/webapp/app.py
 Restart=always
 RestartSec=5
 # 令牌从文件读，避免出现在 ps 输出里
-EnvironmentFile=-/opt/scanapp/.env
+EnvironmentFile=-/root/cutting-app/webapp/.env
 
 # 安全加固
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
-ReadWritePaths=/opt/scanapp
+ReadWritePaths=/root/cutting-app/webapp
 
 [Install]
 WantedBy=multi-user.target
@@ -101,8 +101,8 @@ EOF
 把令牌写进 `.env`（systemd 的 `EnvironmentFile` 只认 `KEY=VALUE`）：
 
 ```bash
-echo "SYNC_TOKEN=$(cat /opt/scanapp/.sync_token)" | sudo tee /opt/scanapp/.env
-sudo chmod 600 /opt/scanapp/.env
+echo "SYNC_TOKEN=$(cat /root/cutting-app/webapp/.sync_token)" | sudo tee /root/cutting-app/webapp/.env
+sudo chmod 600 /root/cutting-app/webapp/.env
 ```
 
 ### 主管白名单 `SUPERVISORS`（D-007）
@@ -111,14 +111,14 @@ sudo chmod 600 /opt/scanapp/.env
 **不配这个变量，所有人都只是普通工人**（看不到改量审批页和全员工资）。
 
 ```bash
-echo "SUPERVISORS=C001,A001,A003" | sudo tee -a /opt/scanapp/.env
+echo "SUPERVISORS=C001,A001,A003" | sudo tee -a /root/cutting-app/webapp/.env
 sudo systemctl restart cutapp.service
 ```
 
-验证：
+验证（`worker_login` 应为 1）：
 
 ```bash
-curl -s https://cut.holyhbc.eu.org/health | python3 -m json.tool
+curl -s https://cut.holyhbc.eu.org/health
 ```
 
 > ⚠️ 改了 `.env` **必须重启**才生效（systemd 只在启动时读一次）。
@@ -126,10 +126,15 @@ curl -s https://cut.holyhbc.eu.org/health | python3 -m json.tool
 ### 建一个登录账号
 
 ```bash
-# 工号必须在 ygzl 花名册里存在，否则登录会被拒（D-018）
-python3 /opt/scanapp/add_test_supervisor.py \
+# 数据库路径会自动找脚本同级的 scan.db，不用手动指定
+cd /root/cutting-app/webapp
+python3 add_test_supervisor.py \
   --ygno C001 --name 测试主管 --phone 13844445555 --pin 5555
 ```
+
+> ⚠️ 本项目实际部署路径是 `/root/cutting-app`（不是 `/root/cutting-app/webapp`）。
+> 脚本按「脚本同级 → `/root/cutting-app/webapp` → `~/cutting-app/webapp`」顺序自动探测，
+> 也可用 `--db-path` 或 `SCAN_DB` 环境变量强制指定。
 
 脚本会检查花名册里有没有这个人，**没有就警告并告诉你先推快照**。
 PIN 只存哈希+盐，不存明文。重复执行幂等。
@@ -137,8 +142,8 @@ PIN 只存哈希+盐，不存明文。重复执行幂等。
 > ⚠️ 手机号**不在**花名册同步范围内（`sync_employees` 只推 `ygno/ygname/ygout`），
 > 手机号只存在本地 `worker_login` 表，所以这一步必须在 VPS 上执行。
 
-> ⚠️ **注意上面 service 文件里的 `EnvironmentFile` 必须在 `ExecStart` 之前声明的位置不影响生效**，
-> systemd 同一段里顺序无关，但 `.env` 文件必须在服务启动**前**存在。
+> systemd 同一段里 `Environment` 和 `EnvironmentFile` 的先后顺序不影响生效，
+> 但 `.env` 文件必须在服务**启动前**存在，否则环境变量读不到。
 
 启动：
 
@@ -242,7 +247,7 @@ sudo ufw deny 10080/tcp      # 兜底，确保 10080 不对外
 
 ```bash
 # 内网自测时才这样起
-BIND_HOST=0.0.0.0 PORT=10080 python3 /opt/scanapp/app.py
+BIND_HOST=0.0.0.0 PORT=10080 python3 /root/cutting-app/webapp/app.py
 ```
 
 systemd 配置里也建议显式写上，避免以后误改：
@@ -354,7 +359,7 @@ curl -s https://cut.holyhbc.eu.org/s/<某个short_id> | head -5
 | 看日志 | `sudo journalctl -u scanapp -f` |
 | 重启 | `sudo systemctl restart scanapp` |
 | 停止 | `sudo systemctl stop scanapp` |
-| 备份库 | `sqlite3 /opt/scanapp/scan.db ".backup /opt/scanapp/scan-$(date +%F).db"` |
+| 备份库 | `sqlite3 /root/cutting-app/webapp/scan.db ".backup /root/cutting-app/webapp/scan-$(date +%F).db"` |
 | 看库统计 | `curl -s https://cut.holyhbc.eu.org/health` |
 | 看待同步 | 浏览器打开 `https://cut.holyhbc.eu.org/admin/pending` |
 
@@ -364,7 +369,7 @@ curl -s https://cut.holyhbc.eu.org/s/<某个short_id> | head -5
 ```bash
 sudo crontab -e
 # 每天 02:00 备份，保留 14 天
-0 2 * * * sqlite3 /opt/scanapp/scan.db ".backup /opt/scanapp/backup/scan-$(date +\%F).db" && find /opt/scanapp/backup -name '*.db' -mtime +14 -delete
+0 2 * * * sqlite3 /root/cutting-app/webapp/scan.db ".backup /root/cutting-app/webapp/backup/scan-$(date +\%F).db" && find /root/cutting-app/webapp/backup -name '*.db' -mtime +14 -delete
 ```
 
 ---
