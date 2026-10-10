@@ -3,8 +3,10 @@
 
 集中放在这里，避免两边算出不一样的结果。
 """
+import re
+
 from db import (get_conn, get_plan_qty, get_reported_qty, get_reported_by_employee,
-               get_bundle_colors, get_zdno_summary)
+               get_bundle_colors, get_zdno_summary, now_str)
 
 # 一次报工的数量上限，防止误填把手数当件数
 MAX_SINGLE_REPORT = 100000
@@ -99,6 +101,134 @@ def employee_change_limit(zdno, cc, zh, gx, ygno):
     reported = get_reported_qty(zdno, cc, zh, gx)
     mine = get_reported_by_employee(zdno, cc, zh, gx, ygno)
     return max(0, plan - (reported - mine))
+
+
+# ---------------------------------------------------------------- 登录
+
+def norm_phone(raw):
+    """手机号归一化：只留数字、剥 +86。与 import_workers.py 保持一致。"""
+    d = re.sub(r"\D", "", str(raw or ""))
+    if d.startswith("0086") and len(d) == 15:
+        d = d[4:]
+    elif d.startswith("86") and len(d) == 13:
+        d = d[2:]
+    return d
+
+
+def _pin_ok(stored_hash, salt, pin):
+    import hashlib
+    h = hashlib.sha256((salt + ":" + str(pin)).encode("utf-8")).hexdigest()
+    return h == stored_hash
+
+
+def login(account, pin):
+    """用工号**或**手机号 + PIN 登录，返回 (ok, 令牌, 员工信息, 提示)。
+
+    D-016：两个标识都能用 —— 有些工人记不住工号但记得住手机号。
+    D-017：PIN 只比对哈希，不留明文。
+    D-018：令牌长期有效，但每次使用都要重新查 ygzl，离职即失效。
+    """
+    account = str(account or "").strip()
+    pin = str(pin or "").strip()
+    if not account:
+        raise RuleError("请填写工号或手机号", "no_account")
+    if not pin:
+        raise RuleError("请填写 PIN", "no_pin")
+
+    conn = get_conn()
+    phone = norm_phone(account)
+    row = None
+    if phone:
+        row = conn.execute(
+            "SELECT * FROM worker_login WHERE phone=?", (phone,)).fetchone()
+    if row is None:
+        row = conn.execute(
+            "SELECT * FROM worker_login WHERE ygno=?", (account,)).fetchone()
+    if row is None:
+        raise RuleError("工号或手机号未登记，请找班组长录入", "not_registered")
+    if int(row["active"] or 0) == 0:
+        raise RuleError(f"{row['ygname']} 暂时不能登录（已停用）", "inactive")
+    if not _pin_ok(row["pin_hash"], row["pin_salt"], pin):
+        raise RuleError("PIN 不对", "bad_pin")
+
+    # 关键：每次登录都重新查 ygzl，确认在职（D-018）
+    emp = get_conn().execute(
+        "SELECT ygno, ygname, ygout FROM ygzl WHERE ygno=?", (row["ygno"],)).fetchone()
+    if not emp:
+        raise RuleError("该工号已不在员工花名册中", "not_in_roster")
+    if int(emp[2] or 0) == 1:
+        raise RuleError(f"{emp[1]} 已离职，不能登录", "resigned")
+
+    import secrets
+    token = secrets.token_urlsafe(32)
+    import datetime
+    ts = datetime.datetime.now()
+    far = (ts + datetime.timedelta(days=3650)).strftime("%Y-%m-%d %H:%M:%S")
+    get_conn().execute(
+        "INSERT INTO worker_session (token, ygno, created_at, expires_at, last_seen, device) "
+        "VALUES (?,?,?,?,?,?)",
+        (token, emp[0], ts.strftime("%Y-%m-%d %H:%M:%S"), far,
+         ts.strftime("%Y-%m-%d %H:%M:%S"), ""))
+    get_conn().commit()
+    return True, token, {"ygno": emp[0], "ygname": emp[1]}, bool(row["must_change"])
+
+
+def whoami(token):
+    """凭令牌取员工。每次都查 ygzl —— 离职即失效（D-018）。"""
+    if not token:
+        return None
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM worker_session WHERE token=?", (token,)).fetchone()
+    if not row:
+        return None
+    emp = conn.execute("SELECT ygno, ygname, ygout FROM ygzl WHERE ygno=?",
+                       (row["ygno"],)).fetchone()
+    if not emp or int(emp[2] or 0) == 1:
+        logout(token)      # 离职/不在册 → 立即作废令牌
+        return None
+    return {"ygno": emp[0], "ygname": emp[1]}
+
+
+def logout(token):
+    if not token:
+        return
+    conn = get_conn()
+    conn.execute("DELETE FROM worker_session WHERE token=?", (token,))
+    conn.commit()
+
+
+# ---------------------------------------------------------------- R2 工序记忆
+
+def remember_pref(ygno, zdno, cc, zh, gx):
+    """记住该工人在这扎/这单做的工序（覆盖式，只留最新）。"""
+    if not ygno:
+        return
+    ts = now_str()
+    conn = get_conn()
+    for scope in ("bundle", "zdno"):
+        conn.execute(
+            "INSERT INTO worker_pref (ygno,scope,zdno,cc,zh,gx,updated_at) "
+            "VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT(ygno,scope,zdno,cc,zh) DO UPDATE SET gx=excluded.gx, "
+            "updated_at=excluded.updated_at",
+            (ygno, scope, zdno, int(cc), int(zh), int(gx), ts))
+    conn.commit()
+
+
+def recall_pref(ygno, zdno, cc, zh):
+    """两级回退：先查(工号+扎)，再查(工号+定单)。返回 gx 或 None。"""
+    if not ygno:
+        return None
+    conn = get_conn()
+    r = conn.execute(
+        "SELECT gx FROM worker_pref WHERE ygno=? AND scope='bundle' AND zdno=? AND cc=? AND zh=?",
+        (ygno, zdno, int(cc), int(zh))).fetchone()
+    if r:
+        return int(r[0])
+    r = conn.execute(
+        "SELECT gx FROM worker_pref WHERE ygno=? AND scope='zdno' AND zdno=?",
+        (ygno, zdno)).fetchone()
+    return int(r[0]) if r else None
 
 
 def bundle_view(zdno, cc, zh):

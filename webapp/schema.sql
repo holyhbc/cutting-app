@@ -126,6 +126,56 @@ CREATE TABLE IF NOT EXISTS ygzl (
 );
 
 -- ---------------------------------------------------------------------
+-- 登录凭据：工号 / 手机号 / PIN 哈希
+--   手机号可空；登录时「工号 或 手机号」都能查到（D-016）
+--   PIN 只存哈希+盐（D-017），初始 PIN 由导入脚本按手机号后4位生成
+--   active=0 表示暂时不能登录（如调去别的车间），与 ygzl.ygout(离职)职责分离
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS worker_login (
+    ygno        TEXT    PRIMARY KEY,          -- 工号，主标识
+    ygname      TEXT    NOT NULL DEFAULT '',  -- 姓名，仅显示（ygzl 有重名，不能作标识）
+    phone       TEXT,                         -- 手机号，已归一化为纯数字
+    pin_hash    TEXT    NOT NULL,             -- PIN 哈希，不存明文
+    pin_salt    TEXT    NOT NULL,
+    must_change INTEGER NOT NULL DEFAULT 1,   -- 1=提示工人改 PIN
+    active      INTEGER NOT NULL DEFAULT 1,   -- 0=不能登录
+    created_at  TEXT    NOT NULL,
+    updated_at  TEXT
+);
+-- phone 可为 NULL，SQLite 的 UNIQUE 允许多个 NULL
+CREATE UNIQUE INDEX IF NOT EXISTS ux_worker_login_phone
+    ON worker_login (phone);
+
+-- ---------------------------------------------------------------------
+-- 登录态令牌：长期有效（D-018），每次使用都重新查 ygzl 确认在职
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS worker_session (
+    token      TEXT    PRIMARY KEY,
+    ygno       TEXT    NOT NULL,
+    created_at TEXT    NOT NULL,
+    expires_at TEXT    NOT NULL,
+    last_seen  TEXT    NOT NULL,
+    device     TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS ix_session_ygno ON worker_session (ygno);
+
+-- ---------------------------------------------------------------------
+-- R2 工序偏好：覆盖式，只留最新一道
+--   scope='bundle' 按(工号+扎)精确记忆；scope='zdno'按(工号+定单)款式记忆
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS worker_pref (
+    ygno       TEXT    NOT NULL,
+    scope      TEXT    NOT NULL,
+    zdno       TEXT    NOT NULL,
+    cc         INTEGER NOT NULL,
+    zh         INTEGER NOT NULL,
+    gx         INTEGER NOT NULL,
+    updated_at TEXT    NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_pref_bundle
+    ON worker_pref (ygno, scope, zdno, cc, zh);
+
+-- ---------------------------------------------------------------------
 -- 操作审计
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS audit (
