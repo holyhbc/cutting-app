@@ -293,4 +293,110 @@ def stats():
         "pending": one("SELECT COUNT(*) FROM report WHERE status='pending'"),
         "synced": one("SELECT COUNT(*) FROM report WHERE status='synced'"),
         "failed": one("SELECT COUNT(*) FROM report WHERE status='failed'"),
+        "ygzl": one("SELECT COUNT(*) FROM ygzl"),
+        "worker_login": one("SELECT COUNT(*) FROM worker_login"),
+        "pending_change": one("SELECT COUNT(*) FROM change_request WHERE status='pending'"),
     }
+
+
+# ---------------------------------------------------------------- 改量审批
+
+def get_report(id_):
+    r = get_conn().execute("SELECT * FROM report WHERE id=?", (id_,)).fetchone()
+    return dict(r) if r else None
+
+
+def has_pending_change(report_id):
+    """同一报工是否已有待审申请（有就不能再提）。"""
+    r = get_conn().execute(
+        "SELECT COUNT(*) FROM change_request WHERE report_id=? AND status='pending'",
+        (report_id,)).fetchone()
+    return int(r[0]) > 0
+
+
+def create_change(report_id, ygno, ygname, new_js, reason):
+    """工人申请改量。返回 (id, 说明)。"""
+    rep = get_report(report_id)
+    if not rep:
+        raise ValueError("报工记录不存在")
+    ts = now_str()
+    with _write_lock:
+        conn = get_conn()
+        if has_pending_change(report_id):
+            raise ValueError("这条报工已有一条待审批的改量申请，请等主管处理完")
+        conn.execute(
+            "INSERT INTO change_request (report_id, jfgzid, ygno, ygname, gx, gxname, "
+            "zdno, cc, zh, old_num, new_num, reason, status, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'pending',?)",
+            (report_id, rep["jfgzid"], ygno, ygname, rep["gx"], rep["gxname"],
+             rep["zdno"], rep["cc"], rep["zh"], rep["js"], int(new_js), reason, ts))
+        conn.commit()
+        new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    log_audit("change_apply",
+              f"#{new_id} {rep['zdno']} gx{rep['gx']} {rep['js']}->{new_js} by {ygno}")
+    return new_id
+
+
+def list_changes(status="pending", ygno=None, limit=200):
+    """列改量申请。主管看全部（可按状态筛），工人只看自己的。"""
+    sql = "SELECT * FROM change_request WHERE 1=1"
+    args = []
+    if status:
+        sql += " AND status=?"
+        args.append(status)
+    if ygno:
+        sql += " AND ygno=?"
+        args.append(ygno)
+    sql += " ORDER BY id DESC LIMIT ?"
+    args.append(limit)
+    # SQLite 的 execute 只接受 (sql, 序列)，不能用 *args 展开
+    return [dict(r) for r in get_conn().execute(sql, args).fetchall()]
+
+
+def decide_change(change_id, approve, approve_gh, note=""):
+    """主管审批。用条件更新保证并发下只有一条能成功。
+
+    返回 (成功?, 说明)
+    """
+    with _write_lock:
+        conn = get_conn()
+        row = conn.execute(
+            "SELECT id, status FROM change_request WHERE id=?", (change_id,)).fetchone()
+        if not row:
+            return False, "申请不存在"
+        if row[1] != "pending":
+            return False, f"该申请已处理（{row[1]}），不能重复审批"
+        cur = conn.execute(
+            "UPDATE change_request SET status=?, approve_gh=?, approve_note=?, approve_at=? "
+            "WHERE id=? AND status='pending'",
+            ("approved" if approve else "rejected", approve_gh, note or "", now_str(),
+             change_id))
+        changed = cur.rowcount
+        conn.commit()
+    if changed != 1:
+        return False, "该申请已被其他人处理"
+    log_audit("change_decide",
+              f"#{change_id} {'通过' if approve else '驳回'} by {approve_gh} {note or ''}")
+    return True, ("已通过" if approve else "已驳回")
+
+
+def count_pending_changes():
+    return int(get_conn().execute(
+        "SELECT COUNT(*) FROM change_request WHERE status='pending'").fetchone()[0])
+
+
+def list_unsynced_changes(limit=100):
+    rows = get_conn().execute(
+        "SELECT * FROM change_request WHERE status='approved' AND synced=0 "
+        "ORDER BY id LIMIT ?", (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_change_synced(change_id, ok, err=""):
+    conn = get_conn()
+    if ok:
+        conn.execute("UPDATE change_request SET synced=1 WHERE id=?", (change_id,))
+    else:
+        conn.execute("UPDATE change_request SET synced=-1, approve_note=? WHERE id=?",
+                     ((err or "")[:500], change_id))
+    conn.commit()

@@ -65,6 +65,7 @@ def sync_employees(cur, conn):
         "INSERT INTO ygzl (ygno, ygname, ygout) VALUES (?,?,?) "
         "ON CONFLICT(ygno) DO UPDATE SET ygname=excluded.ygname, ygout=excluded.ygout",
         [(r[0], r[1], int(r[2] or 0)) for r in rows])
+    conn.commit()      # ⚠️ 别漏：漏了会导致读到 N 条但库里 0 条
     return len(rows)
 
 

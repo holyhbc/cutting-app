@@ -5,6 +5,8 @@
 """
 import re
 
+import db as D
+
 from db import (get_conn, get_plan_qty, get_reported_qty, get_reported_by_employee,
                get_bundle_colors, get_zdno_summary, now_str)
 
@@ -252,4 +254,91 @@ def bundle_view(zdno, cc, zh):
         "colors": colors,
         "summary": summary,
         "processes": procs,
+    }
+
+
+# ================================================================ 改量审批
+
+# 改量时限：30 天内可申请（用户确认，见 DESIGN-CHANGE.md Q4）
+CHANGE_DAYS_LIMIT = 30
+# 同一报工改量后新值的下限，避免负数/零
+MIN_CHANGE_JS = 1
+
+
+def _parse_ts(s):
+    import datetime
+    try:
+        return datetime.datetime.strptime(str(s)[:19], "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+
+
+def is_supervisor(ygno):
+    """主管白名单。ygzl 里没有可靠的职务字段，只能靠环境变量（D-007）。"""
+    import os
+    raw = os.environ.get("SUPERVISORS", "")
+    sup = {x.strip() for x in raw.replace("，", ",").split(",") if x.strip()}
+    return str(ygno or "") in sup
+
+
+def check_change_request(report_id, new_js, reason, ygno):
+    """校验改量申请。返回 (report, 新值)。不通过抛 RuleError。
+
+    ygno 显式传入，不用模块级全局变量 ——
+    全局变量在多线程下会互相串，导致 A 的请求用 B 的身份校验。
+    """
+    rep = D.get_report(report_id)
+    if not rep:
+        raise RuleError("报工记录不存在", "no_report")
+    if rep["ygno"] != str(ygno or ""):
+        raise RuleError("只能修改自己的报工", "not_owner")
+    if D.has_pending_change(report_id):
+        raise RuleError("这条报工已有一条待审批的改量申请", "dup_pending")
+
+    try:
+        new_js = int(new_js)
+    except (TypeError, ValueError):
+        raise RuleError("新数量必须是整数", "bad_qty")
+    if new_js < MIN_CHANGE_JS:
+        raise RuleError(f"新数量必须大于等于 {MIN_CHANGE_JS}", "bad_qty")
+    if new_js == rep["js"]:
+        raise RuleError("新数量和原数量一样，无需申请", "same")
+    if not str(reason or "").strip():
+        raise RuleError("请填写改量理由，主管要凭理由判断", "no_reason")
+
+    # 30 天时限
+    created = _parse_ts(rep["created_at"])
+    if created:
+        import datetime
+        age = (datetime.datetime.now() - created).days
+        if age > CHANGE_DAYS_LIMIT:
+            raise RuleError(
+                f"超过 {CHANGE_DAYS_LIMIT} 天不能改量（这条报工是 {age} 天前的），"
+                "请走线下流程找管理员", "too_old")
+
+    # 上限重算：改后合计 = 已报合计 - 原值 + 新值
+    plan = get_plan_qty(rep["zdno"], rep["cc"], rep["zh"])
+    reported = get_reported_qty(rep["zdno"], rep["cc"], rep["zh"], rep["gx"])
+    after = reported - rep["js"] + new_js
+    if after > plan:
+        raise RuleError(
+            f"改后仍会超量：这扎应做 {plan} 件，「{rep['gxname']}」改后合计 "
+            f"{after} 件", "over_limit")
+
+    return rep, new_js
+
+
+def change_view(ch):
+    """给页面用的申请视图。"""
+    return {
+        "id": ch["id"], "report_id": ch["report_id"], "jfgzid": ch["jfgzid"],
+        "ygno": ch["ygno"], "ygname": ch["ygname"],
+        "gx": ch["gx"], "gxname": ch["gxname"],
+        "zdno": ch["zdno"], "cc": ch["cc"], "zh": ch["zh"],
+        "old_num": ch["old_num"], "new_num": ch["new_num"],
+        "delta": ch["new_num"] - ch["old_num"],
+        "reason": ch["reason"], "status": ch["status"],
+        "approve_gh": ch["approve_gh"], "approve_note": ch["approve_note"],
+        "created_at": ch["created_at"], "approve_at": ch["approve_at"],
+        "synced": ch["synced"],
     }

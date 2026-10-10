@@ -64,16 +64,12 @@ END
 GO
 
 -- ---------------------------------------------------------------------
--- 同一 jfgzid 只允许一条「待审」申请，避免重复提交刷单
--- 注意：SQL Server 2000 不支持 filtered index，
---       因此用 status 参与唯一索引来近似，
---       代价是 status 变更后索引项会被更新（可接受）
+-- ⚠️ 刻意不加 UNIQUE INDEX (jfgzid, status)
+--
+-- 原稿有该唯一索引，会导致「同一条报工只能有一条通过、一条驳回」，
+-- 工人改完还想再改时就提不了申请。
+-- 现改为应用层校验：同一 jfgzid **同时**只能有一条 pending。
+--   → 对应 SQL Server 侧 WHERE status=0 的条件更新，
+--     并发审批时只有一条能成功。
+-- 见 docs/DESIGN-CHANGE.md 第十节 Q1。
 -- ---------------------------------------------------------------------
-IF NOT EXISTS (SELECT 1 FROM sysindexes WHERE name = 'UX_jfzg_change_pending')
-BEGIN
-    CREATE UNIQUE INDEX UX_jfzg_change_pending ON jfzg_change (jfgzid, status)
-    PRINT 'V003: 唯一索引 UX_jfzg_change_pending 已创建'
-    PRINT 'V003: ⚠️ 注意——(jfgzid,status) 唯一意味着同一报工记录'
-    PRINT 'V003:    通过(1)或驳回(2)后不能再有第二条同状态申请，'
-    PRINT 'V003:    如需放开请改为应用层校验。'
-END

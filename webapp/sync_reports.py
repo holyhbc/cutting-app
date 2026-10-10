@@ -105,6 +105,60 @@ def already_exists(cur, rec):
     return r[0] if r else None
 
 
+def apply_change(cur, ch):
+    """把一条已审批的改量写回 SQL Server。
+
+    铁律：jfgz 只能经 jfzg_change 留痕后改写，且要校验审批单确实存在且通过。
+    返回 (成功, 说明, jfzg_change_id)
+    """
+    jfgzid = ch.get("jfgzid")
+    if not jfgzid:
+        return False, "该报工还没同步到 jfgz，无法改量（先等它同步）", None
+
+    # 审批单必须存在且 status=1（已通过）
+    row = cur.execute(
+        "SELECT TOP 1 id, ygno, status FROM jfzg_change "
+        "WHERE jfgzid=? AND ygno=? AND status=1 ORDER BY id DESC",
+        jfgzid, ch["ygno"]).fetchone()
+    if not row:
+        return False, f"jfgzid={jfgzid} 在 jfzg_change 里找不到已通过的审批单", None
+    chg_id = int(row[0])
+
+    # 读当前值（事务内读最新，避免用陈旧数据算上限）
+    cur.execute("SELECT zdno, cc, zh, gx, js, ISNULL(dj,0) FROM jfgz WHERE jfgzid=?",
+                jfgzid)
+    cur_rec = cur.fetchone()
+    if not cur_rec:
+        return False, f"jfgzid={jfgzid} 在 jfgz 里不存在", None
+    zdno, cc, zh, gx, old_js, dj = cur_rec
+
+    new_js = int(ch["new_js"])
+    if int(old_js) == new_js:
+        return True, f"数量已是 {new_js}，无需改", chg_id
+
+    # 幂等：同一审批单已处理过就不再改
+    cur.execute("SELECT COUNT(*) FROM jfzg_change WHERE id=? AND approve_at IS NOT NULL",
+                chg_id)
+    if cur.fetchone()[0] and ch.get("synced"):
+        return True, f"审批单 {chg_id} 已处理", chg_id
+
+    # 上限重算：改后合计必须 <= 应做数
+    plan = plan_qty(cur, zdno, cc, zh)
+    cur.execute("SELECT ISNULL(SUM(js),0) FROM jfgz WHERE zdno=? AND cc=? AND zh=? AND gx=?",
+                zdno, cc, zh, gx)
+    reported = int(cur.fetchone()[0] or 0)
+    after = reported - int(old_js) + new_js
+    if after > plan:
+        return False, (f"改后超量：应做{plan}，改后合计{after}（已报{reported}，"
+                       f"原值{old_js}→新值{new_js}）"), None
+
+    je = round(new_js * float(dj or 0), 3)
+    cur.execute("UPDATE jfgz SET js=?, je=? WHERE jfgzid=?", (new_js, je, jfgzid))
+    cur.execute("UPDATE jfzg_change SET approve_at=ISNULL(approve_at, GETDATE()) WHERE id=?",
+                chg_id)
+    return True, f"jfgzid={jfgzid} 数量 {old_js}→{new_js}（审批单 {chg_id}）", chg_id
+
+
 def insert_report(cur, rec, gxname, dj):
     """写入 jfgz。barcode=1 表示扫码录入（D-003），gzdate 完整时间（D-004）。"""
     je = round(rec["js"] * dj, 3)
@@ -184,14 +238,50 @@ def main():
         return 1
 
     items = data.get("reports") or []
-    print(f"\n待同步 {len(items)} 条")
+
+    # ---- 改量审批：先处理已通过但未同步的 ----
+    try:
+        chg = vps_get(args.server, "/api/changes?status=approved", args.token)
+        changes = chg.get("changes") or []
+    except Exception:
+        changes = []
+
+    if changes:
+        print(f"\n已审批待写回的改量 {len(changes)} 条")
+        for ch in changes:
+            try:
+                exist = cur_change_id(cur, ch)
+                ok, msg, cid = apply_change(cur, ch)
+                if ok:
+                    conn.commit()
+                    results_chg.append({"id": ch["id"], "ok": True, "msg": msg})
+                    print(f"  [改量] {msg}")
+                else:
+                    conn.rollback()
+                    results_chg.append({"id": ch["id"], "ok": False, "msg": msg})
+                    print(f"  [改量] 失败：{msg}")
+            except Exception as e:
+                conn.rollback()
+                results_chg.append({"id": ch["id"], "ok": False, "msg": str(e)})
+                print(f"  [改量] 异常：{e}")
+        if not args.dry_run and results_chg:
+            try:
+                vps_post(args.server, "/api/changes/ack",
+                         {"results": results_chg}, args.token)
+                print(f"  改量回执已发送")
+            except Exception as e:
+                print(f"  改量回执失败（下次幂等重试）：{e}")
+
+    print(f"\n待同步报工 {len(items)} 条")
     if not items:
-        print("没有待同步的报工。")
+        if not changes:
+            print("没有待同步的报工。")
         return 0
 
     conn = connect(args.target)
     cur = conn.cursor()
     results = []
+    results_chg = []
     ok_n = fail_n = dup_n = 0
 
     for rec in items:

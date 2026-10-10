@@ -110,6 +110,17 @@ button.ghost{background:#f0f0f0;color:#333}
 .mbtn{width:100%;padding:13px;font-size:16px;font-weight:600;border:0;
       border-radius:11px;background:#0a84ff;color:#fff;margin-top:8px}
 .mbtn.ghostm{background:#f0f0f0;color:#333}
+.mbtn.warnm{background:#fff3e0;color:#e65100}
+.apbadge{display:inline-block;min-width:19px;height:19px;line-height:19px;
+         padding:0 6px;border-radius:10px;background:#ff3b30;color:#fff;
+         font-size:12px;font-weight:700;text-align:center}
+.cha{background:#fff;border-radius:11px;padding:14px;margin-bottom:10px;
+     box-shadow:0 1px 4px rgba(0,0,0,.06)}
+.cha .cn{font-weight:700;font-size:15px;margin-bottom:5px}
+.cha .cd{font-size:13px;color:#555;line-height:1.7}
+.cha .cf{font-size:12px;color:#999;margin-top:5px}
+.dl{font-weight:700;font-size:17px}
+.dl.up{color:#28a745}.dl.dn{color:#d9534f}
 #cam{width:100%;border-radius:11px;background:#000;aspect-ratio:1;object-fit:cover}
 .pill.ok{background:#e8f7ed;color:#28a745}
 .pill.no{background:#ffeaea;color:#d9534f}
@@ -128,7 +139,7 @@ def esc(s):
     return html.escape(str(s if s is not None else ""), quote=True)
 
 
-def page_scan(smap, view, err="", done="", me=None, prefer_gx=None, token=""):
+def page_scan(smap, view, err="", done="", me=None, prefer_gx=None, token="", last_report_id=0):
     """扫码落地页。工人只需：填工号 → 选工序 → 填数量 → 提交。"""
     procs = view["processes"]
     rows = []
@@ -174,6 +185,7 @@ def page_scan(smap, view, err="", done="", me=None, prefer_gx=None, token=""):
             f'<div class="mbody" id="okbody">{esc(done)}</div>'
             '<button class="mbtn" onclick="closeOk()">继续报这扎</button>'
             '<button class="mbtn ghostm" onclick="closeOk();openScan()">扫下一扎</button>'
+            '<button class="mbtn warnm" onclick="chg(' + str(last_report_id) + '">报错了，要改量</button>'
             '</div></div>')
     err_mask = ""
     if err and not done:
@@ -263,7 +275,9 @@ def page_scan(smap, view, err="", done="", me=None, prefer_gx=None, token=""):
 
 <script>
 var okShown = {"true" if done else "false"};
+var TOKEN = "{esc(token)}";
 function closeOk(){{ document.getElementById('okmask').style.display='none'; }}
+function chg(rid){{ location.href='/change?report_id='+rid+'&t='+TOKEN; }}
 function closeErr(){{ document.getElementById('errmask').style.display='none'; }}
 document.addEventListener('DOMContentLoaded', function(){{
   if(okShown) closeOk();
@@ -472,6 +486,128 @@ def page_pending(rows):
 </div></body></html>"""
 
 
+# ==================== 改量申请页 / 主管审批页 ====================
+
+def _page_shell(title, body, extra_head=""):
+    return f"""<!doctype html><html lang="zh-CN"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{esc(title)}</title><style>{CSS}</style>{extra_head}</head>
+<body><div class="wrap">{body}</div></body></html>"""
+
+
+def page_change_apply(rep, token, err="", mine=None):
+    """工人申请改量。"""
+    body = [f'<div class="card"><h1>修改报工数量</h1>'
+            f'<p class="sub">改量需要主管审批，通过后才生效。</p>'
+            f'<div class="kv"><span class="k">员工</span>'
+            f'<span class="v">{esc(rep["ygname"])}（{esc(rep["ygno"])}）</span></div>'
+            f'<div class="kv"><span class="k">定单</span><span class="v">{esc(rep["zdno"])}</span></div>'
+            f'<div class="kv"><span class="k">扎号</span>'
+            f'<span class="v">第 {rep["zh"]} 扎（{rep["cc"]} 层）</span></div>'
+            f'<div class="kv"><span class="k">工序</span>'
+            f'<span class="v">{rep["gx"]}. {esc(rep["gxname"])}</span></div>'
+            f'<div class="kv"><span class="k">原报数量</span>'
+            f'<span class="v big">{rep["js"]} 件</span></div></div>']
+
+    if mine:
+        st = mine["status"]
+        label = {"pending": "待主管审批", "approved": "已通过",
+                 "rejected": "被驳回"}[st]
+        cls = {"pending": "", "approved": "ok-msg", "rejected": "err"}[st]
+        body.append(
+            f'<div class="card {cls}"><h2>我的申请</h2>'
+            f'<p>{rep["js"]} 件 → {mine["new_num"]} 件（{label}）</p>'
+            f'<p class="muted">理由：{esc(mine["reason"])}</p>'
+            + (f'<p class="muted">驳回原因：{esc(mine["approve_note"] or "")}</p>'
+               if st == "rejected" else "")
+            + f'<p class="muted">{esc(mine["created_at"])}</p></div>')
+        body.append('<div class="card"><a href="/m?short_id='
+                    + esc(rep["short_id"] or "") + '&t=' + esc(token) + '">'
+                    '<button class="ghost">← 返回扫码页</button></a></div>')
+        return _page_shell("修改报工数量", "".join(body))
+
+    body.append(
+        f'<form class="card" method="POST" action="/change">'
+        f'<input type="hidden" name="report_id" value="{rep["id"]}">'
+        f'<input type="hidden" name="token" value="{esc(token)}">'
+        f'<label>改成多少件</label>'
+        f'<input name="new_js" type="number" inputmode="numeric" min="1" '
+        f'value="{rep["js"]}" required>'
+        f'<label>改量理由（必填，主管要凭这个判断）</label>'
+        f'<input name="reason" placeholder="例如：少算了 5 件，实际只裁了 45 件" required>'
+        f'<button type="submit">提交审批</button>'
+        f'<a href="/m?short_id=' + esc(rep["short_id"] or "") + '&t=' + esc(token) + '">'
+        f'<button type="button" class="ghost">取消</button></a></form>')
+    if err:
+        body.insert(1, f'<div class="err">{esc(err)}</div>')
+    return _page_shell("修改报工数量", "".join(body))
+
+
+def page_approve(me, changes, pending, token, tab="pending"):
+    """主管审批页。"""
+    body = [f'<div class="card"><h1>改量审批</h1>'
+            f'<p class="sub">主管：{esc(me["ygname"])}（{esc(me["ygno"])}）</p>'
+            f'<div class="kv"><span class="k">待审批</span>'
+            f'<span class="v"><span class="apbadge">{pending}</span> 条</span></div>'
+            f'<a href="/approve?status=pending&t=' + esc(token) + '">'
+            f'<button class="ghost">待审（{pending}）</button></a>'
+            f'<a href="/approve?status=all&t=' + esc(token) + '">'
+            f'<button class="ghost">全部记录</button></a></div>']
+
+    if not changes:
+        body.append('<div class="card"><p class="muted">没有记录</p></div>')
+        return _page_shell("改量审批", "".join(body))
+
+    for c in changes:
+        d = c["delta"]
+        arrow = "↑" if d > 0 else "↓"
+        dcls = "up" if d > 0 else "dn"
+        s = c["status"]
+        stxt = {"pending": '<span class="pill">待审</span>',
+                "approved": '<span class="pill ok">已通过</span>',
+                "rejected": '<span class="pill no">已驳回</span>'}[s]
+        body.append(
+            f'<div class="cha"><div class="cn">{esc(c["ygname"])}（{esc(c["ygno"])}） '
+            f'{stxt}</div>'
+            f'<div class="cd">{esc(c["zdno"])} 扎{c["zh"]} · {c["gx"]}.{esc(c["gxname"])}</div>'
+            f'<div class="cd">{c["old_num"]} 件 → '
+            f'<span class="dl {dcls}">{c["new_num"]} 件（{arrow}{abs(d)}）</span></div>'
+            f'<div class="cd">理由：{esc(c["reason"])}</div>'
+            f'<div class="cf">{esc(c["created_at"])}'
+            + (f' · 审批：{esc(c["approve_gh"] or "")} '
+               f'{esc(c["approve_at"] or "")}' if c.get("approve_at") else "")
+            + (f'<br>驳回原因：{esc(c["approve_note"] or "")}'
+               if s == "rejected" and c.get("approve_note") else "")
+            + '</div>')
+        if s == "pending":
+            body.append(
+                f'<div style="display:flex;gap:9px;margin-top:11px">'
+                f'<button style="flex:1;background:#28a745" '
+                f"onclick=\"dec({c['id']},1)\">通过</button>"
+                f'<button style="flex:1;background:#d9534f" '
+                f"onclick=\"dec({c['id']},0)\">驳回</button></div>")
+        body.append('</div>')
+
+    body.append(
+        '<script>\n'
+        'function dec(id,ap){'
+        '  var note="";'
+        '  if(!ap){note=prompt("驳回原因（工人会看到）")||"";'
+        '    if(note===null)return;}'
+        '  fetch("/api/change/decide",{method:"POST",'
+        '    headers:{"Content-Type":"application/json"},'
+        '    body:JSON.stringify({token:TOKEN,id:id,approve:ap,note:note})})'
+        '   .then(function(r){return r.json();})'
+        '   .then(function(d){ if(d.ok){location.reload();} '
+        '     else {alert(d.msg||"操作失败");} })'
+        '   .catch(function(){alert("网络错误");});'
+        '}\n'
+        f'var TOKEN = "{esc(token)}";\n'
+        '</script>')
+    return _page_shell("改量审批", "".join(body))
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "ScanReport/1.0"
 
@@ -514,6 +650,26 @@ class Handler(BaseHTTPRequestHandler):
                 return self._handle_pending()
             if path == "/api/scanmap":
                 return self._handle_scanmap()
+            if path == "/api/change":
+                return self._handle_change_list()
+            if path == "/api/changes":
+                return self._handle_changes_export()
+            if path == "/approve":
+                me = R.whoami((parse_qs(u.query).get("t", [""])[0]) or "")
+                if not me:
+                    return self._send(404, page_notfound(""))
+                if not R.is_supervisor(me["ygno"]):
+                    return self._send(403, _page_shell("无权限",
+                        '<div class="card"><h1>无权限</h1><p class="sub">'
+                        '只有主管可以打开审批页。</p></div>'))
+                tab = parse_qs(u.query).get("status", ["pending"])[0] or "pending"
+                rows = D.list_changes(status=(None if tab == "all" else tab), limit=300)
+                tok = parse_qs(u.query).get("t", [""])[0]
+                return self._send(200, page_approve(
+                    me, [R.change_view(r) for r in rows],
+                    D.count_pending_changes(), tok, tab), head_only=head_only)
+            if path == "/change":
+                return self._handle_change_form()
             if path == "/admin/pending":
                 return self._send(200, page_pending(D.list_pending(500)),
                                   head_only=head_only)
@@ -571,6 +727,173 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True})
         except Exception as e:
             self._json({"ok": False, "msg": str(e)}, 400)
+
+    def _tok_user(self, data=None):
+        """从请求里取登录态，返回员工信息或 None。
+
+        GET 请求没有 body，令牌要从 query 里取；
+        POST 才从 body 取。
+        """
+        if data is None:
+            if self.command == "POST":
+                data = self._read_json()
+            else:
+                q = parse_qs(urlparse(self.path).query)
+                data = {"token": (q.get("t", [""])[0] or q.get("token", [""])[0])}
+        return R.whoami(data.get("token") or "")
+
+    def _read_json(self):
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+            return json.loads(self.rfile.read(n).decode("utf-8")) if n else {}
+        except Exception:
+            return {}
+
+    def _handle_change_form(self):
+        """GET 展示申请页；POST 提交申请。"""
+        u = urlparse(self.path)
+        q = parse_qs(u.query)
+        if self.command == "POST":
+            data = self._read_json_form()
+            token = data.get("token", "")
+            try:
+                me = R.whoami(token)
+                if not me:
+                    return self._send(403, _page_shell("请先登录",
+                        '<div class="card"><h1>请先登录</h1></div>'))
+                rep, new_js = R.check_change_request(
+                    int(data.get("report_id", 0)), data.get("new_js"),
+                    data.get("reason"), me["ygno"])
+                cid = D.create_change(rep["id"], me["ygno"], me["ygname"],
+                                      new_js, str(data.get("reason", "")).strip())
+                mine = D.list_changes(status=None, ygno=me["ygno"], limit=1)
+                mine = mine[0] if mine and mine[0]["id"] == cid else {"status": "pending",
+                        "new_num": new_js, "reason": str(data.get("reason", "")),
+                        "created_at": "", "approve_note": ""}
+                return self._send(200, page_change_apply(rep, token, mine=mine))
+            except R.RuleError as e:
+                rep = D.get_report(int(data.get("report_id", 0) or 0))
+                if not rep:
+                    return self._send(400, _page_shell("出错了",
+                        f'<div class="card"><h1>出错了</h1><p>{esc(e.message)}</p></div>'))
+                return self._send(400, page_change_apply(rep, token, err=e.message))
+            except Exception as e:
+                return self._send(500, _page_shell("出错了",
+                    f'<div class="card"><h1>出错了</h1><p>{esc(str(e))}</p></div>'))
+        rid = int(q.get("report_id", ["0"])[0] or 0)
+        token = q.get("t", [""])[0] or ""
+        me = R.whoami(token)
+        if not me:
+            return self._send(403, _page_shell("请先登录",
+                '<div class="card"><h1>请先登录</h1>'
+                '<p class="sub">请从扫码页登录后再改量。</p></div>'))
+        rep = D.get_report(rid)
+        if not rep:
+            return self._send(404, page_notfound(""))
+        if rep["ygno"] != me["ygno"]:
+            return self._send(403, _page_shell("无权限",
+                '<div class="card"><h1>无权限</h1>'
+                '<p class="sub">只能修改自己的报工。</p></div>'))
+        mine = D.list_changes(status=None, ygno=me["ygno"], limit=50)
+        mine = next((m for m in mine if m["report_id"] == rid), None)
+        return self._send(200, page_change_apply(rep, token, mine=mine))
+
+    def _read_json_form(self):
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+            return parse_qs(self.rfile.read(n).decode("utf-8"))
+        except Exception:
+            return {}
+
+    def _handle_change_apply(self):
+        """工人申请改量。"""
+        try:
+            data = self._read_json()
+            me = R.whoami(data.get("token", ""))
+            if not me:
+                return self._json({"ok": False, "msg": "请先登录"}, 401)
+            rep, new_js = R.check_change_request(
+                int(data.get("report_id", 0)), data.get("new_js"),
+                data.get("reason"), me["ygno"])
+            cid = D.create_change(rep["id"], me["ygno"], me["ygname"],
+                                  new_js, str(data.get("reason", "")).strip())
+            self._json({"ok": True, "id": cid,
+                        "msg": f"申请已提交：{rep['js']} 件 → {new_js} 件，等主管审批"})
+        except R.RuleError as e:
+            self._json({"ok": False, "msg": e.message, "code": e.code}, 400)
+        except ValueError as e:
+            self._json({"ok": False, "msg": str(e)}, 400)
+        except Exception as e:
+            self._json({"ok": False, "msg": str(e)}, 500)
+
+    def _handle_change_list(self):
+        """主管看待审（或指定状态），工人只看自己的。"""
+        try:
+            me = self._tok_user()
+            if not me:
+                return self._json({"ok": False, "msg": "请先登录"}, 401)
+            u = urlparse(self.path)
+            q = parse_qs(u.query)
+            status = (q.get("status", ["pending"])[0] or "pending").strip()
+            if status == "all":
+                status = None
+            if R.is_supervisor(me["ygno"]):
+                rows = D.list_changes(status=status, limit=300)
+            else:
+                rows = D.list_changes(status=status, ygno=me["ygno"], limit=100)
+            self._json({"ok": True, "me": me, "is_supervisor": R.is_supervisor(me["ygno"]),
+                        "pending": D.count_pending_changes(),
+                        "changes": [R.change_view(r) for r in rows]})
+        except Exception as e:
+            self._json({"ok": False, "msg": str(e)}, 400)
+
+    def _handle_change_decide(self):
+        """主管审批。"""
+        try:
+            data = self._read_json()
+            me = R.whoami(data.get("token", ""))
+            if not me:
+                return self._json({"ok": False, "msg": "请先登录"}, 401)
+            if not R.is_supervisor(me["ygno"]):
+                return self._json({"ok": False, "msg": "只有主管可以审批"}, 403)
+            cid = int(data.get("id", 0))
+            approve = 1 if str(data.get("approve")) in ("1", "true", "True") else 0
+            ok, msg = D.decide_change(cid, bool(approve), me["ygno"],
+                                      str(data.get("note", "")).strip())
+            if not ok:
+                return self._json({"ok": False, "msg": msg}, 400)
+            D.log_audit("change_decide", f"#{cid} {msg} by {me['ygno']}",
+                        self.client_address[0])
+            self._json({"ok": True, "msg": msg, "pending": D.count_pending_changes()})
+        except Exception as e:
+            self._json({"ok": False, "msg": str(e)}, 400)
+
+    def _handle_changes_export(self):
+        """同步器取已审批待写回的改量。"""
+        if not self._auth_sync():
+            return
+        u = urlparse(self.path)
+        status = (parse_qs(u.query).get("status", ["approved"])[0] or "approved")
+        rows = D.list_changes(status=status, limit=200)
+        if status == "approved":
+            rows = [r for r in rows if not r["synced"]]
+        self._json({"ok": True, "count": len(rows),
+                    "changes": [R.change_view(r) for r in rows]})
+
+    def _handle_changes_ack(self):
+        """同步器回报改量写回结果。"""
+        if not self._auth_sync():
+            return
+        data = self._read_json()
+        ok = bad = 0
+        for r in data.get("results") or []:
+            if r.get("id") is None:
+                continue
+            D.mark_change_synced(int(r["id"]), bool(r.get("ok")), r.get("msg", ""))
+            ok += 1 if r.get("ok") else 0
+            bad += 0 if r.get("ok") else 1
+        D.log_audit("changes_ack", f"ok={ok} bad={bad}", self.client_address[0])
+        self._json({"ok": True, "synced": ok, "failed": bad})
 
     def _auth_sync(self):
         """校验同步令牌。返回 True 表示通过。"""
@@ -676,6 +999,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_login()
         if path == "/api/logout":
             return self._handle_logout()
+        if path == "/api/change/apply":
+            return self._handle_change_apply()
+        if path == "/api/changes/ack":
+            return self._handle_changes_ack()
+        if path == "/change":
+            return self._handle_change_form()
+        if path == "/api/change/decide":
+            return self._handle_change_decide()
         if path != "/api/report":
             return self._send(404, "<h1>404</h1>")
         try:
@@ -722,7 +1053,8 @@ class Handler(BaseHTTPRequestHandler):
                        f"金额 {info['js'] * info['dj']:.2f} 元。等待同步到服务器。")
             pref2 = R.recall_pref(emp["ygno"], smap["zdno"], smap["cc"], smap["zh"])
             return self._send(200, page_scan(smap, view2, done=msg, me=me,
-                                             prefer_gx=pref2, token=tok))
+                                             prefer_gx=pref2, token=tok,
+                                             last_report_id=res.get("id") or 0))
 
         except Exception as e:
             D.log_audit("error", f"POST: {e}", self.client_address[0])

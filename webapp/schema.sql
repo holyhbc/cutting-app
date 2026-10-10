@@ -100,22 +100,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_report_idem
     ON report (short_id, zdno, cc, zh, gx, ygno, js, gzdate);
 
 -- ---------------------------------------------------------------------
--- 改量申请：阶段 3 使用，先建表
--- 对应 SQL Server 的 jfzg_change (sql/V003)
--- ---------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS change_request (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    report_id   INTEGER NOT NULL,          -- 要改的那条报工
-    jfgzid      INTEGER,                   -- 已同步后的 jfgzid
-    new_js      INTEGER NOT NULL,
-    reason      TEXT    NOT NULL DEFAULT '',
-    status      TEXT    NOT NULL DEFAULT 'pending',  -- pending/approved/rejected
-    created_at  TEXT    NOT NULL,
-    approve_at  TEXT,
-    approve_gh  TEXT
-);
-
--- ---------------------------------------------------------------------
 -- 员工花名册快照：登录校验用，只读
 -- 对应 SQL Server 的 ygzl
 -- ---------------------------------------------------------------------
@@ -174,6 +158,36 @@ CREATE TABLE IF NOT EXISTS worker_pref (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_pref_bundle
     ON worker_pref (ygno, scope, zdno, cc, zh);
+
+-- ---------------------------------------------------------------------
+-- 改量申请（阶段 3）
+-- 对应 SQL Server 的 jfzg_change (sql/V003)
+-- 铁律：已生效的 jfgz 禁止直接 UPDATE，必须经本表留痕后由审批流程改写。
+-- 状态：pending -> approved / rejected，单向不可逆
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS change_request (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id  INTEGER NOT NULL,          -- 指向本地 report.id
+    jfgzid     INTEGER,                   -- 已同步后的 jfgzid；未同步时为 NULL
+    ygno       TEXT    NOT NULL,          -- 申请人
+    ygname     TEXT    NOT NULL DEFAULT '',
+    gx         INTEGER NOT NULL,
+    gxname     TEXT    NOT NULL DEFAULT '',
+    zdno       TEXT    NOT NULL,
+    cc         INTEGER,
+    zh         INTEGER,
+    old_num    INTEGER NOT NULL,          -- 改前
+    new_num    INTEGER NOT NULL,          -- 改后
+    reason     TEXT    NOT NULL DEFAULT '',
+    status     TEXT    NOT NULL DEFAULT 'pending',  -- pending/approved/rejected
+    approve_gh TEXT,
+    approve_note TEXT,
+    created_at TEXT    NOT NULL,          -- 用于 30 天时限判断
+    approve_at TEXT,
+    synced     INTEGER NOT NULL DEFAULT 0 -- 1=已写回 SQL Server
+);
+CREATE INDEX IF NOT EXISTS ix_change_status ON change_request (status, id);
+CREATE INDEX IF NOT EXISTS ix_change_report ON change_request (report_id);
 
 -- ---------------------------------------------------------------------
 -- 操作审计
