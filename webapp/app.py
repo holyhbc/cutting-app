@@ -82,6 +82,17 @@ a.btn{display:block;text-align:center;width:100%;padding:13px;
       font-size:16px;text-decoration:none;margin-bottom:9px;box-sizing:border-box}
 a.btn.ghost{background:#f0f0f0;color:#333}
 a.btn:last-child{margin-bottom:0}
+/* 报工明细：手机屏幕窄，用整行底色表示同步状态，省掉一列 */
+table.rep{width:100%;border-collapse:collapse;font-size:14px}
+table.rep th{background:#eef1f6;color:#333;font-weight:600;padding:9px 6px;
+             white-space:nowrap;position:sticky;top:0}
+table.rep td{padding:9px 6px;border-top:1px solid #eee;white-space:nowrap}
+table.rep tr.r-sync td{background:#fff}
+table.rep tr.r-wait td{background:#fff7e6}
+table.rep tr.r-fail td{background:#fdecea}
+.legend{display:flex;flex-wrap:wrap;gap:12px;margin-top:8px;font-size:13px}
+.legend i{display:inline-block;width:13px;height:13px;border-radius:3px;
+          vertical-align:-2px;margin-right:5px;border:1px solid rgba(0,0,0,.1)}
 .proc{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:13px;
       border:1.5px solid #eee;border-radius:11px;margin-bottom:9px;cursor:pointer}
 .proc>div{flex:1 1 auto;min-width:0}
@@ -1219,17 +1230,17 @@ class Handler(BaseHTTPRequestHandler):
         dto = self._q("to", _today()) or _today()
         rows = D.report_mine(dfrom, dto, me["ygno"], 300)
         summ = D.report_mine_summary(dfrom, dto, me["ygno"])
-        # 「扎」按工人熟悉的口径显示：标签上印的是扎号(zh)，不是 cc-zh。
-        # cc 是定单内的车间层序号，只有报表/对账才需要，所以放到小字备注里。
-        trs = [[str(r["gzdate"])[:16], r["zdno"],
-                (f'{r["gx"]}·{r["gxname"]}' if r.get("gxname") else str(r["gx"])),
-                (f'{r["zh"]}'
-                 f'<div style="font-size:11px;color:#888">第{r["cc"]}层</div>'
-                 if r.get("cc") else str(r.get("zh") or "-")),
-                r["js"], f'{float(r["je"] or 0):.2f}',
-                ('<span class="pill">待同步</span>'
-                 if r.get("src") in ("pending", "failed") else "已同步")]
-               for r in rows]
+        # 手机屏幕窄：状态不占一列，改用整行底色表示；
+        # 工序拆成「编号 + 名称」两列，窄屏也能对齐看。
+        RC = {"synced": "r-sync", "pending": "r-wait", "failed": "r-fail"}
+        trs = []
+        for r in rows:
+            cls = RC.get(r.get("src"), "r-sync")
+            trs.append(
+                (cls, [str(r["gzdate"])[:16], r["zdno"],
+                       (r["gxname"] or "—") if r.get("gxname") else "",
+                       r["gx"], (r.get("zh") if r.get("zh") is not None else "—"),
+                       r["js"], f'{float(r["je"] or 0):.2f}']))
         head = (f'<div class="card"><h1>👤 我的报工</h1>'
                 f'<p class="sub">{esc(me["ygname"])}（{esc(me["ygno"])}）　'
                 f'{dfrom} ~ {dto}</p>'
@@ -1258,12 +1269,21 @@ class Handler(BaseHTTPRequestHandler):
             body.append('<div class="card"><p class="muted">'
                         '这段时间没有报工记录。</p></div>')
             return self._send(200, _page_shell("我的报工", "".join(body)))
-        cells = "".join(f"<th>{esc(h)}</th>" for h in
-                        ["时间", "定单", "工序", "扎", "件数", "金额", "状态"])
-        tr_html = "".join("<tr>" + "".join(f"<td>{c}</td>" for c in t) + "</tr>"
-                          for t in trs)
-        body.append('<div class="card" style="overflow-x:auto"><table>'
-                    f'<tr>{cells}</tr>{tr_html}</table></div>')
+        heads = ["时间", "定单", "工序名称", "工序", "扎", "件数", "金额"]
+        cells = "".join(f"<th>{esc(h)}</th>" for h in heads)
+        tr_html = ""
+        for cls, t in trs:
+            tds = "".join(f"<td>{esc(str(c))}</td>" for c in t)
+            tr_html += f'<tr class="{cls}">{tds}</tr>'
+        legend = ('<div class="legend">'
+                  '<span><i style="background:#fff7e6"></i>待同步</span>'
+                  '<span><i style="background:#fdecea"></i>同步失败</span>'
+                  '<span><i style="background:#fff"></i>已同步</span>'
+                  '</div>')
+        body.append('<div class="card"><p class="muted" style="margin:0 0 8px">'
+                    '底色表示同步状态：</p>' + legend +
+                    '<div style="overflow-x:auto;margin-top:10px">'
+                    f'<table class="rep"><tr>{cells}</tr>{tr_html}</table></div></div>')
         return self._send(200, _page_shell("我的报工", "".join(body)))
 
     def _handle_report_progress(self):
