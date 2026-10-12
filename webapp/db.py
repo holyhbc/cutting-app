@@ -349,12 +349,21 @@ def stats():
 # ---------------------------------------------------------------- 改量审批
 
 def get_report(id_):
+    # 表单/查询串传进来的是字符串，统一转 int，避免绑到 INTEGER 列时出错
+    try:
+        id_ = int(id_)
+    except (TypeError, ValueError):
+        return None
     r = get_conn().execute("SELECT * FROM report WHERE id=?", (id_,)).fetchone()
     return dict(r) if r else None
 
 
 def has_pending_change(report_id):
     """同一报工是否已有待审申请（有就不能再提）。"""
+    try:
+        report_id = int(report_id)
+    except (TypeError, ValueError):
+        return False
     r = get_conn().execute(
         "SELECT COUNT(*) FROM change_request WHERE report_id=? AND status='pending'",
         (report_id,)).fetchone()
@@ -363,6 +372,13 @@ def has_pending_change(report_id):
 
 def create_change(report_id, ygno, ygname, new_js, reason):
     """工人申请改量。返回 (id, 说明)。"""
+    # 表单传来的都是字符串，SQLite 不接受 str 绑到 INTEGER 列。
+    # 必须在入口统一转成 int，否则报
+    # "Error binding parameter 0 - probably unsupported type"。
+    try:
+        report_id = int(report_id)
+    except (TypeError, ValueError):
+        raise ValueError("报工记录编号无效")
     rep = get_report(report_id)
     if not rep:
         raise ValueError("报工记录不存在")
@@ -405,6 +421,10 @@ def decide_change(change_id, approve, approve_gh, note=""):
 
     返回 (成功?, 说明)
     """
+    try:
+        change_id = int(change_id)
+    except (TypeError, ValueError):
+        return False, "申请编号无效"
     with _write_lock:
         conn = get_conn()
         row = conn.execute(

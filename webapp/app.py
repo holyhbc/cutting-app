@@ -306,7 +306,13 @@ function doLogin(){{
 }}
 // 页面打开时：URL 没带令牌但 localStorage 里有，就补上。
 // 这样从二维码进来、已登录过的工人不用每次都重新登录。
+//
+// 必须限定只在扫码页 /s/xxx 生效：
+// 报工表单 POST 到 /api/report 后，浏览器地址就停在 /api/report，
+// 此时若无条件跳转，会把刚成功的页面换成 GET /api/report?t=...，
+// 而 /api/report 只注册了 do_POST，GET 过去必然 404。
 (function(){{
+  if(location.pathname.indexOf('/s/') !== 0) return;
   var m=location.search.match(/[?&]t=([^&]+)/);
   if(m){{ try{{ localStorage.setItem('scan_token', decodeURIComponent(m[1])); }}catch(e){{}} return; }}
   var t='';
@@ -319,8 +325,10 @@ function logout(){{
         body:JSON.stringify({{token:t}})}})
     .then(function(){{
       try{{ localStorage.removeItem('scan_token'); }}catch(e){{}}
-      // 必须跳到不带 ?t= 的地址，否则刷新后令牌又被读回来，等于没退出
-      location.href = location.pathname;
+      // 必须跳到扫码页且不带 ?t=，否则刷新后令牌又被读回来，等于没退出。
+      // 也不能停在 /api/report（那是 POST 的落点，GET 过去会 404）。
+      var sid=(location.pathname.indexOf('/s/')===0) ? location.pathname : '/';
+      location.href = sid;
     }});
 }}
 
