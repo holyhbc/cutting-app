@@ -93,6 +93,9 @@ table.rep tr.r-fail td{background:#fdecea}
 .legend{display:flex;flex-wrap:wrap;gap:12px;margin-top:8px;font-size:13px}
 .legend i{display:inline-block;width:13px;height:13px;border-radius:3px;
           vertical-align:-2px;margin-right:5px;border:1px solid rgba(0,0,0,.1)}
+/* 进度条 */
+.pbar{height:9px;background:#eceff3;border-radius:5px;overflow:hidden;margin-top:8px}
+.pbar i{display:block;height:100%;border-radius:5px}
 .proc{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:13px;
       border:1.5px solid #eee;border-radius:11px;margin-bottom:9px;cursor:pointer}
 .proc>div{flex:1 1 auto;min-width:0}
@@ -759,6 +762,101 @@ def page_report_home(me, meta, token, is_sup):
     return _page_shell("统计报表", "".join(body))
 
 
+def page_progress_search(kw, token, results):
+    """进度页的定单搜索。"""
+    items = ""
+    for r in results:
+        items += (f'<a class="btn ghost" style="text-align:left" href="/report/progress'
+                  f'?zdno={esc(r["zdno"])}&t={esc(token)}">'
+                  f'<div style="display:flex;justify-content:space-between">'
+                  f'<span>{esc(r["zdno"])}</span>'
+                  f'<span style="color:#888;font-weight:400">'
+                  f'{r["recs"]}笔 · {r["pcs"]:,}件 · {esc(r["last_day"])}</span>'
+                  f'</div></a>')
+    body = [f'<div class="card"><h1>📈 定单进度</h1>'
+            f'<p class="sub">查某个定单裁到哪了</p>'
+            f'<form method="GET" action="/report/progress">'
+            f'<input type="hidden" name="t" value="{esc(token)}">'
+            f'<input name="q" value="{esc(kw or "")}" '
+            f'placeholder="输入定单号，如 269831" autocomplete="off" required>'
+            f'<button type="submit">查找</button></form></div>']
+    if kw:
+        body.append(f'<div class="card"><h2>找到 {len(results)} 个定单</h2>'
+                    + (items or '<p class="muted">没找到这个定单的报工记录</p>')
+                    + '</div>')
+    body.append(f'<div class="card"><a class="btn ghost" href="/report?t={esc(token)}">'
+                f'← 返回报表</a></div>')
+    return _page_shell("定单进度", "".join(body))
+
+
+def _bar(rate):
+    """完成率进度条。"""
+    rate = max(0, min(100, rate))
+    color = "#1e8e3e" if rate >= 100 else ("#b26a00" if rate >= 50 else "#0a84ff")
+    return (f'<div class="pbar"><i style="width:{rate:.0f}%;background:{color}"></i></div>')
+
+
+def page_progress(zdno, data, token):
+    """定单进度：总进度 + 每扎 + 每道工序。"""
+    plan = int(data["plan"] or 0)
+    bundles = data["bundles"]
+    procs = data["procs"]
+    # 总进度按「完工扎数」算：一扎要所有工序都做满才算完工。
+    # 直接拿件数除会超 100%（每道工序都要报满同一批件数）。
+    nproc = len(procs)
+    fin = [b for b in bundles if b["done"] >= (b["plan_qty"] or 0)]
+    rate = (len(fin) / len(bundles) * 100) if bundles else 0
+    total_done = sum(b["done"] for b in bundles)
+    done_cnt = sum(1 for p in procs if plan and (p["done"] + p["wait"]) >= plan)
+
+    body = [f'<div class="card"><h1>📈 定单进度</h1>'
+            f'<p class="sub">{esc(zdno)}</p>'
+            f'<div style="display:flex;justify-content:space-between;align-items:baseline">'
+            f'<span style="font-size:26px;font-weight:700">{rate:.0f}%</span>'
+            f'<span style="color:#666">{len(fin)} / {len(bundles)} 扎完工</span></div>'
+            + _bar(rate)
+            + f'<div class="kv" style="margin-top:10px">'
+            f'<span class="k">应做总数</span><span class="v">{plan:,} 件</span></div>'
+            f'<div class="kv"><span class="k">工序完成</span>'
+            f'<span class="v">{done_cnt} / {nproc} 道</span></div>'
+            f'</div>']
+
+    if bundles:
+        cells = "".join(f"<th>{esc(h)}</th>" for h in ["扎", "颜色", "应做", "最慢工序已报", "进度"])
+        trs = ""
+        for b in bundles:
+            done = b["done"]
+            pct = (done / b["plan_qty"] * 100) if b["plan_qty"] else 0
+            trs += (f'<tr><td>{b["zh"]}</td><td>{esc(b["yn"] or "—")}</td>'
+                    f'<td>{b["plan_qty"]:,}</td><td>{done:,}</td>'
+                    f'<td>{pct:.0f}%</td></tr>')
+        body.append(f'<div class="card"><h2>各扎进度</h2>'
+                    f'<p class="muted" style="margin:0 0 8px">'
+                    f'按「最慢那道工序」计，全部工序做满这扎才算完工。</p>'
+                    f'<table class="rep"><tr>{cells}</tr>{trs}</table></div>')
+
+    if procs:
+        cells = "".join(f"<th>{esc(h)}</th>" for h in ["工序", "应做", "已报", "完成率"])
+        trs = ""
+        for p in procs:
+            done = p["done"] + p["wait"]
+            pct = (done / plan * 100) if plan else 0
+            tag = "" if pct >= 100 else ('<span class="pill">进行中</span>'
+                                         if pct > 0 else '<span class="pill no">未开工</span>')
+            trs += (f'<tr><td>{esc(p["gxname"] or p["gx"])}</td>'
+                    f'<td>{plan:,}</td><td>{done:,}</td>'
+                    f'<td>{pct:.0f}% {tag}</td></tr>')
+        body.append(f'<div class="card"><h2>各工序进度</h2>'
+                    f'<table class="rep"><tr>{cells}</tr>{trs}</table></div>')
+    elif not plan:
+        body.append('<div class="card"><p class="muted">'
+                    '这个定单还没有推送过裁剪快照，应做数暂不可用。</p></div>')
+
+    body.append(f'<div class="card"><a class="btn ghost" href="/report/progress?t={esc(token)}">'
+                f'← 换定单</a></div>')
+    return _page_shell("定单进度", "".join(body))
+
+
 def page_report_table(title, sub, headers, rows, token, back, total=None):
     """通用报表表格页（手机卡片式，不用宽表格）。"""
     body = [f'<div class="card"><h1>{esc(title)}</h1>'
@@ -1288,7 +1386,11 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(200, _page_shell("我的报工", "".join(body)))
 
     def _handle_report_progress(self):
-        """定单进度（仅主管）。"""
+        """定单进度（仅主管）。
+
+        进度页的意义是「做到哪了」，所以必须同时给应做数和完成率，
+        只显示已报数看不出进度。
+        """
         me, tok = self._report_user()
         if not me:
             return self._redirect_login()
@@ -1296,16 +1398,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(403, _page_shell("无权限",
                 '<div class="card"><h1>无权限</h1><p class="sub">'
                 '只有主管可以查看定单进度。</p></div>'))
+        kw = self._q("q")
         zdno = self._q("zdno")
         if not zdno:
-            return self._send(200, page_report_prompt(
-                "定单进度", tok, "/report/progress",
-                [("zdno", "定单进度")], True))
-        rows = D.report_progress(zdno)
-        trs = [[r["gx"], r["recs"], r["pcs"], f'{r["amt"]:.2f}'] for r in rows]
-        sub = f"{zdno}　共 {len(rows)} 道工序"
-        return self._send(200, page_report_table(
-            "定单进度", sub, ["工序", "报工次数", "件数", "金额"], trs, tok, "/report"))
+            return self._send(200, page_progress_search(kw, tok,
+                                                        D.report_search_orders(kw) if kw else []))
+        data = D.report_progress(zdno)
+        return self._send(200, page_progress(zdno, data, tok))
 
     def _handle_report_wage(self):
         """计件工资（口径 A：SUM(je)）。主管看全部，工人看自己。"""

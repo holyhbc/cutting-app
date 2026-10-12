@@ -580,11 +580,52 @@ def report_detail(dfrom, dto, zdno=None, ygno=None, gx=None, limit=300):
 
 
 def report_progress(zdno):
-    """某定单的报工汇总（按工序）。"""
-    rows = get_conn().execute(
-        "SELECT gx, MAX(ygname) ygname, COUNT(*) recs, SUM(js) pcs, SUM(je) amt"
-        " FROM jfgz_report WHERE zdno=? GROUP BY gx ORDER BY gx", (zdno,)).fetchall()
-    return [dict(r) for r in rows]
+    """定单进度：每道工序的应做/已报/完成率。
+
+    应做数来自 jfzd2（按扎汇总，定单所有扎的件数之和）；
+    每道工序都要做全这个量，所以各工序应做数相同。
+    已报数来自 jfgz_report（含还没同步的本地暂存）。
+    """
+    conn = get_conn()
+    plan = conn.execute(
+        "SELECT COALESCE(SUM(plan_qty),0) FROM bundle WHERE zdno=?", (zdno,)).fetchone()[0]
+    plan = int(plan or 0)
+# 每扎的应做与「最慢工序」已报。
+    # 一扎的进度取决于所有工序里报得最少的那道（每道工序都要做满应做数），
+    # 不能把各工序累加 —— 9 道工序各报 1272，累加是 11448，毫无意义。
+    bundles = [dict(r) for r in conn.execute(
+        "SELECT b.zdno, b.cc, b.zh, COALESCE(b.yn,'') yn, b.plan_qty, "
+        "       COALESCE((SELECT MIN(d) FROM ("
+        "           SELECT COALESCE(SUM(x.js),0) d FROM jfgz_report x "
+        "             WHERE x.zdno=b.zdno AND x.cc=b.cc AND x.zh=b.zh GROUP BY x.gx "
+        "           UNION ALL "
+        "           SELECT COALESCE(SUM(y.js),0) FROM report y "
+        "             WHERE y.zdno=b.zdno AND y.cc=b.cc AND y.zh=b.zh "
+        "             AND y.jfgzid IS NULL GROUP BY y.gx) m),0) done, "
+        "       (SELECT COUNT(DISTINCT p.gx) FROM process p WHERE p.zdno=b.zdno) nproc "
+        "FROM bundle b WHERE b.zdno=? GROUP BY b.zdno,b.cc,b.zh,b.yn,b.plan_qty "
+        "ORDER BY b.cc, b.zh", (zdno,)).fetchall()]
+    # 每道工序（用 process 拿工序名，按名分组避免 gx 歧义）
+    procs = [dict(r) for r in conn.execute(
+        "SELECT p.gx, p.gxname, p.dj, "
+        "       COALESCE((SELECT SUM(r.js) FROM jfgz_report r "
+        "                 WHERE r.zdno=p.zdno AND r.gx=p.gx),0) done, "
+        "       COALESCE((SELECT SUM(r.js) FROM report r "
+        "                 WHERE r.zdno=p.zdno AND r.gx=p.gx AND r.jfgzid IS NULL),0) wait "
+        "FROM process p WHERE p.zdno=? ORDER BY p.gx", (zdno,)).fetchall()]
+    return {"zdno": zdno, "plan": plan, "bundles": bundles, "procs": procs}
+
+
+def report_search_orders(keyword, limit=30):
+    """按定单号模糊搜报过工的定单，进度页好让主管挑。"""
+    kw = (keyword or "").strip()
+    if not kw:
+        return []
+    return [dict(r) for r in get_conn().execute(
+        "SELECT r.zdno, COUNT(*) recs, SUM(r.js) pcs, MAX(r.gzday) last_day "
+        "FROM jfgz_report r WHERE r.zdno LIKE ? "
+        "GROUP BY r.zdno ORDER BY MAX(r.gzdate) DESC LIMIT ?",
+        (f"%{kw}%", int(limit))).fetchall()]
 
 
 def report_mine(dfrom, dto, ygno, limit=100):
