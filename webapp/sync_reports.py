@@ -105,6 +105,52 @@ def already_exists(cur, rec):
     return r[0] if r else None
 
 
+def cur_change_id(cur, ch):
+    """把 VPS 上已批准的改量申请写入 SQL Server 的 jfzg_change，返回该单 id。
+
+    铁律要求「先留痕再改数」—— 以前这张表从来没被写过，
+    apply_change 找不到 status=1 的审批单就永远失败，
+    等于改量功能从上线起就没真正生效过。
+
+    幂等：同一 VPS 申请（用 report_id+新数量定位）已写入就复用，不重复插。
+    """
+    # 1) 已写入过就复用（避免重跑同步器时插出重复审批单）
+    cur.execute(
+        "SELECT TOP 1 id FROM jfzg_change "
+        "WHERE jfgzid=? AND ygno=? AND new_num=? AND status=1 ORDER BY id DESC",
+        ch["jfgzid"], ch["ygno"], int(ch["new_js"]))
+    row = cur.fetchone()
+    if row:
+        return int(row[0])
+
+    # 2) 取报工本身的信息补齐冗余字段
+    cur.execute(
+        "SELECT zdno, gx, cc, zh FROM jfgz WHERE jfgzid=?", ch["jfgzid"])
+    rep = cur.fetchone()
+    if not rep:
+        return None
+    zdno, gx, cc, zh = rep
+    gxname = ""
+    cur.execute("SELECT TOP 1 gxname FROM jfdj WHERE zdno=? AND gx=?", zdno, gx)
+    r = cur.fetchone()
+    if r:
+        gxname = r[0] or ""
+
+    cur.execute(
+        "INSERT INTO jfzg_change "
+        "(short_id, jfgzid, ygno, gx, gxname, zdno, cc, zh, "
+        " old_num, new_num, reason, status, approve_gh, approve_note, "
+        " created_at, approve_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ch.get("short_id") or "", ch["jfgzid"], ch["ygno"], gx, gxname,
+        zdno, cc, zh, int(ch.get("old_num") or 0), int(ch["new_js"]),
+        ch.get("reason") or "", 1, ch.get("approve_gh") or "",
+        ch.get("approve_note") or "", ch.get("created_at") or "",
+        ch.get("approve_at") or "")
+    cur.execute("SELECT @@IDENTITY")
+    return int(cur.fetchone()[0])
+
+
 def apply_change(cur, ch):
     """把一条已审批的改量写回 SQL Server。
 
@@ -133,14 +179,9 @@ def apply_change(cur, ch):
     zdno, cc, zh, gx, old_js, dj = cur_rec
 
     new_js = int(ch["new_js"])
+    # 幂等：数量已经等于目标值，说明这单早就处理过了，不要重复改
     if int(old_js) == new_js:
         return True, f"数量已是 {new_js}，无需改", chg_id
-
-    # 幂等：同一审批单已处理过就不再改
-    cur.execute("SELECT COUNT(*) FROM jfzg_change WHERE id=? AND approve_at IS NOT NULL",
-                chg_id)
-    if cur.fetchone()[0] and ch.get("synced"):
-        return True, f"审批单 {chg_id} 已处理", chg_id
 
     # 上限重算：改后合计必须 <= 应做数
     plan = plan_qty(cur, zdno, cc, zh)
@@ -250,7 +291,14 @@ def main():
         print(f"\n已审批待写回的改量 {len(changes)} 条")
         for ch in changes:
             try:
+                # 先写审批单留痕，再改 jfgz —— 铁律要求的顺序
                 exist = cur_change_id(cur, ch)
+                if not exist:
+                    results_chg.append({"id": ch["id"], "ok": False,
+                                       "msg": f"jfgzid={ch.get('jfgzid')} "
+                                              f"在 jfgz 里找不到，改量无法落地"})
+                    print(f"  [改量] jfgzid={ch.get('jfgzid')} 不存在，跳过")
+                    continue
                 ok, msg, cid = apply_change(cur, ch)
                 if ok:
                     conn.commit()

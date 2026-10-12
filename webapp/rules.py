@@ -332,6 +332,8 @@ def change_view(ch):
     """给页面用的申请视图。"""
     return {
         "id": ch["id"], "report_id": ch["report_id"], "jfgzid": ch["jfgzid"],
+        # short_id 同步器写 jfzg_change 时要用；老数据可能没这列，取不到就空串
+        "short_id": (ch["short_id"] if "short_id" in ch.keys() else ""),
         "ygno": ch["ygno"], "ygname": ch["ygname"],
         "gx": ch["gx"], "gxname": ch["gxname"],
         "zdno": ch["zdno"], "cc": ch["cc"], "zh": ch["zh"],
