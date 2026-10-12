@@ -507,7 +507,34 @@ function closeScan(){{
 </body></html>"""
 
 
-def page_home(st):
+def page_home(st, me=None, is_sup=False):
+    """首页兼导航页。
+
+    以前这里只显示一堆快照计数（本质是运维信息），
+    登录后落地在这儿，等于把人堵在门外 ——
+    报表、审批、后台全得靠手敲网址才知道存在。
+    改成：登录后按身份给出入口；未登录则说明怎么用。
+    """
+    if me:
+        who = f'<p class="sub">{esc(me["ygname"])}（{esc(me["ygno"])}）</p>'
+        links = f'<a class="btn" href="/report?t={esc(me["_token"])}">📊 报表</a>'
+        if is_sup:
+            links += (f'<a class="btn" href="/report/orders?t={esc(me["_token"])}">📋 在手定单</a>'
+                      f'<a class="btn" href="/approve?t={esc(me["_token"])}">✅ 改量审批</a>'
+                      f'<a class="btn ghost" href="/admin?t={esc(me["_token"])}">⚙️ 主管后台</a>')
+        return f"""<!doctype html><html lang="zh-CN"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>扫码报工</title><style>{CSS}</style></head><body><div class="wrap">
+<div class="card"><h1>扫码报工</h1>{who}</div>
+<div class="card"><h2>去哪儿</h2>{links}</div>
+<div class="card"><h2>报工</h2>
+<p class="sub">用微信扫描裁剪标签左下角的二维码即可报工。</p>
+<div class="card" style="background:#f7f8fa">
+<p class="muted" style="margin:0">当前积压 {st['pending']} 条待同步，
+已同步 {st['synced']} 条。</p></div></div>
+</div></body></html>"""
+
     return f"""<!doctype html><html lang="zh-CN"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -515,11 +542,7 @@ def page_home(st):
 <div class="card">
   <h1>扫码报工服务</h1>
   <p class="sub">用微信扫描裁剪标签左下角的二维码即可报工。</p>
-  <div class="kv"><span class="k">扫码映射</span><span class="v">{st['scan_map']}</span></div>
-  <div class="kv"><span class="k">扎快照</span><span class="v">{st['bundle']}</span></div>
-  <div class="kv"><span class="k">工序快照</span><span class="v">{st['process']}</span></div>
-  <div class="kv"><span class="k">待同步</span><span class="v">{st['pending']}</span></div>
-  <div class="kv"><span class="k">已同步</span><span class="v">{st['synced']}</span></div>
+  <a class="btn" href="/login">🔐 登录 / 看报表</a>
 </div>
 <div class="card"><p class="muted">健康检查：<a href="/health">/health</a></p></div>
 </div></body></html>"""
@@ -1087,6 +1110,14 @@ class Handler(BaseHTTPRequestHandler):
         path = u.path.rstrip("/") or "/"
         try:
             if path == "/":
+                # 登录了就给导航入口（主管多几个），没登录给登录按钮
+                tok0 = parse_qs(u.query).get("t", [""])[0]
+                me0 = R.whoami(tok0)
+                if me0:
+                    me0 = dict(me0)
+                    me0["_token"] = tok0
+                    return self._send(200, page_home(
+                        D.stats(), me0, R.is_supervisor(me0["ygno"])), head_only=head_only)
                 return self._send(200, page_home(D.stats()), head_only=head_only)
             if path == "/health":
                 return self._json({"ok": True, "stats": D.stats()}, head_only=head_only)
