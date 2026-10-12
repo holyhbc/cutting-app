@@ -27,16 +27,24 @@ except ImportError:
     print("需要 pyodbc：pip install pyodbc", file=sys.stderr)
     raise
 
+# 和 sync_snapshot.py / sync_reports.py 保持同一套环境变量约定，
+# 否则 run_daily_sync.cmd 里设的 HBC_DB 会被忽略，
+# 导致「写回用测试库、推送用生产库」这种错位。
 DEFAULT_CONN = (
     "DRIVER={SQL Server};"
-    "SERVER=192.168.0.73;"
-    "DATABASE=ShintHrmDb;"
-    "UID=sa;PWD=1"
+    "SERVER=%s;"
+    "DATABASE=%s;"
+    "UID=%s;PWD=%s"
 )
 
 
 def default_conn_str():
-    return os.environ.get("REPORT_CONN_STR", DEFAULT_CONN)
+    return os.environ.get("REPORT_CONN_STR", DEFAULT_CONN % (
+        os.environ.get("HBC_SERVER", "192.168.0.73"),
+        os.environ.get("HBC_DB", "ShintHrmDb-test"),
+        os.environ.get("HBC_USER", "sa"),
+        os.environ.get("HBC_PWD", "1"),
+    ))
 
 
 def fetch_reports(cur, limit=0, since_id=0):
@@ -90,6 +98,14 @@ def push_to_server(target, token, rows, total, max_id, timeout=900, dry_run=Fals
 
 
 def main():
+    # Windows 控制台默认 GBK，中文输出会乱码；强制 UTF-8 并允许替换，
+    # 避免个别字符（如 →）触发 UnicodeEncodeError 直接崩掉整个任务。
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except AttributeError:
+        pass
+
     ap = argparse.ArgumentParser(description="推送 jfgz 报工明细到 VPS（阶段4报表）")
     ap.add_argument("--push", default="https://cut.holyhbc.eu.org", help="VPS 地址")
     ap.add_argument("--conn", default=None, help="SQL Server 连接串（默认生产库）")
