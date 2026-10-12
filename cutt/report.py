@@ -297,11 +297,28 @@ class ReportDB:
     def group_by(self, dim, dfrom, dto, limit=20000):
         """按指定维度汇总：zdno / ygno / gx / day。ygno 维度带姓名。
 
-        两个 SQL Server 2000 的限制必须绕开：
+        gx 维度按**工序名**汇总而不是 gx 数字：
+        实测同一个 gx 数字在不同定单里对应几十种工序
+        （gx=1 有 67 种），按数字汇总会把不相干的工序混在一起。
+        反过来「裤线头」这类工序名跨 4000+ 个定单，按名字汇总才有意义。
+
+        三个 SQL Server 2000 的限制必须绕开：
           1. TOP 不能用占位符 ?，也不能带括号（那是 2005+），只能内联裸整数
           2. GROUP BY 不接受表达式（如 CONVERT(...)），必须先在派生表里算好
+          3. jfdj 里 gxname 是 nvarchar，报表用 jfgz 直接关联即可
         """
         limit = int(limit)
+        if dim == "gx":
+            sql = f"""
+            SELECT TOP {limit} t.k, '' AS kname,
+                   COUNT(*) AS recs, SUM(t.js) AS pcs, SUM(t.je) AS amt
+            FROM (SELECT ISNULL(NULLIF(j.gxname,''),'(未命名)') AS k,
+                         r.js AS js, r.je AS je
+                  FROM jfgz r LEFT JOIN jfdj j ON j.zdno=r.zdno AND j.gx=r.gx
+                  WHERE r.gzdate >= ? AND r.gzdate < ?) t
+            GROUP BY t.k ORDER BY pcs DESC
+            """
+            return self._rows(sql, (dfrom, dto))[1]
         if dim == "ygno":
             key = "r.ygno"
             kname = "ISNULL(y.ygname,'')"
@@ -325,22 +342,29 @@ class ReportDB:
         return self._rows(sql, (dfrom, dto))[1]
 
     def detail(self, dfrom, dto, zdno=None, ygno=None, gx=None, limit=50000):
-        """报工明细（可多维过滤）。"""
-        where = "WHERE gzdate >= ? AND gzdate < ?"
+        """报工明细（可多维过滤）。带工序名和颜色，gx 数字仅作辅助。"""
+        where = "WHERE r.gzdate >= ? AND r.gzdate < ?"
         args = [dfrom, dto]
         if zdno:
-            where += " AND zdno = ?"
+            where += " AND r.zdno = ?"
             args.append(zdno)
         if ygno:
-            where += " AND ygno = ?"
+            where += " AND r.ygno = ?"
             args.append(ygno)
         if gx is not None:
-            where += " AND gx = ?"
+            where += " AND r.gx = ?"
             args.append(gx)
         limit = int(limit)
         sql = f"""
-        SELECT TOP {limit} gzdate, ygno, zdno, gx, cc, zh, js, dj, je, barcode
-        FROM jfgz {where} ORDER BY gzdate
+        SELECT TOP {limit} r.gzdate, r.ygno, r.zdno, r.gx,
+               ISNULL(j.gxname,'') AS gxname,
+               ISNULL(b.yn,'') AS yn, r.cc, r.zh, r.js, r.dj, r.je, r.barcode
+        FROM jfgz r
+        LEFT JOIN jfdj j ON j.zdno=r.zdno AND j.gx=r.gx
+        LEFT JOIN (SELECT zdno, cc, zh, MIN(YS) AS yn FROM jfzd2
+                   GROUP BY zdno, cc, zh) b
+               ON b.zdno=r.zdno AND b.cc=r.cc AND b.zh=r.zh
+        {where} ORDER BY r.gzdate
         """
         return self._rows(sql, args)[1]
 
@@ -750,8 +774,8 @@ class ReportWindow:
                    command=self._do_detail).pack(side="left", padx=6)
         ttk.Button(bar, text="📈 导出", command=self._export_detail).pack(side="left")
 
-        wrap, self.tr_detail = self._mktree(page, ["时间", "工号", "定单", "工序", "CC", "扎", "件数", "单价", "金额"],
-                                            [150, 70, 150, 60, 50, 50, 80, 80, 90])
+        wrap, self.tr_detail = self._mktree(page, ["时间", "工号", "定单", "工序名称", "颜色", "扎", "件数", "单价", "金额"],
+                                            [150, 70, 150, 110, 80, 50, 80, 80, 90])
         wrap.pack(fill="both", expand=True)
 
     def _do_detail(self):
@@ -769,10 +793,11 @@ class ReportWindow:
 
     def _show_detail(self, data):
         self.tr_detail.delete(*self.tr_detail.get_children())
-        for gzdate, ygno, zdno, gx, cc, zh, js, dj, je, barcode in data:
+        for (gzdate, ygno, zdno, gx, gxname, yn, cc, zh, js, dj, je,
+             barcode) in data:
             self.tr_detail.insert("", "end", values=(
-                str(gzdate)[:16], ygno, zdno, gx, cc, zh, js,
-                float(dj), float(je), barcode))
+                str(gzdate)[:16], ygno, zdno, gxname or gx, yn or "", zh, js,
+                float(dj), float(je)))
         self._status(f"明细 {len(data)} 行")
 
     def _export_detail(self):
@@ -784,9 +809,10 @@ class ReportWindow:
                   lambda d: self._save_detail(dfrom, dto, d))
 
     def _save_detail(self, dfrom, dto, data):
-        headers = ["时间", "工号", "定单", "工序", "CC", "扎", "件数", "单价", "金额", "条码"]
-        rows = [[str(a)[:16], b, c, d, e, f, g, float(h), float(i), j]
-                for a, b, c, d, e, f, g, h, i, j in data]
+        headers = ["时间", "工号", "定单", "工序gx", "工序名称", "颜色",
+                   "CC", "扎", "件数", "单价", "金额", "条码"]
+        rows = [[str(a)[:16], b, c, d, e, f, g, h, i, float(j), float(k), l]
+                for a, b, c, d, e, f, g, h, i, j, k, l in data]
         self._save_excel(f"明细_{self._dstr(dfrom)}_{self._dstr(dto - timedelta(days=1))}",
                          "明细", headers, rows)
 

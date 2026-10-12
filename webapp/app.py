@@ -1231,15 +1231,16 @@ class Handler(BaseHTTPRequestHandler):
         rows = D.report_mine(dfrom, dto, me["ygno"], 300)
         summ = D.report_mine_summary(dfrom, dto, me["ygno"])
         # 手机屏幕窄：状态不占一列，改用整行底色表示；
-        # 工序拆成「编号 + 名称」两列，窄屏也能对齐看。
+        # gx 编号已被工序名称取代，那一列换成颜色（工人真正关心认哪件衣服）。
         RC = {"synced": "r-sync", "pending": "r-wait", "failed": "r-fail"}
         trs = []
         for r in rows:
             cls = RC.get(r.get("src"), "r-sync")
             trs.append(
                 (cls, [str(r["gzdate"])[:16], r["zdno"],
-                       (r["gxname"] or "—") if r.get("gxname") else "",
-                       r["gx"], (r.get("zh") if r.get("zh") is not None else "—"),
+                       (r["gxname"] or "—"),
+                       (r.get("yn") or "—"),
+                       (r.get("zh") if r.get("zh") is not None else "—"),
                        r["js"], f'{float(r["je"] or 0):.2f}']))
         head = (f'<div class="card"><h1>👤 我的报工</h1>'
                 f'<p class="sub">{esc(me["ygname"])}（{esc(me["ygno"])}）　'
@@ -1269,7 +1270,7 @@ class Handler(BaseHTTPRequestHandler):
             body.append('<div class="card"><p class="muted">'
                         '这段时间没有报工记录。</p></div>')
             return self._send(200, _page_shell("我的报工", "".join(body)))
-        heads = ["时间", "定单", "工序名称", "工序", "扎", "件数", "金额"]
+        heads = ["时间", "定单", "工序名称", "颜色", "扎", "件数", "金额"]
         cells = "".join(f"<th>{esc(h)}</th>" for h in heads)
         tr_html = ""
         for cls, t in trs:
@@ -1329,8 +1330,9 @@ class Handler(BaseHTTPRequestHandler):
                for r in rows]
         total = f'共 {len(rows)} 组'
         dimname = {"zdno": "定单", "ygno": "员工", "gx": "工序", "day": "日期"}[dim]
-        # 第二列的含义跟着分组维度走：按员工是姓名，按工序是工序名
-        kname = {"ygno": "姓名", "gx": "工序名称"}.get(dim, "")
+        # 工序维度已经是「工序名」本身，不需要第二列；
+        # 员工维度才需要附带姓名。
+        kname = {"ygno": "姓名"}.get(dim, "")
         heads = [dimname] + ([kname] if kname else []) + ["次数", "件数", "金额"]
         sub = f"{dfrom} ~ {dto}　按{dimname}　{total}"
         return self._send(200, page_report_table(

@@ -509,29 +509,34 @@ def report_meta():
 def report_group(dim, dfrom, dto, limit=20000):
     """多维汇总：dim in (zdno, ygno, gx, day)。
 
-    ygno 维度带员工姓名；gx 维度带工序名（从本地 process 表关联，
-    它就是 jfdj 推下来的，主键 zdno+gx，实测覆盖 99.9% 的历史记录）。
+    ygno 维度带员工姓名。
+    gx 维度按**工序名**汇总，而不是按 gx 数字：
+      实测同一个 gx 数字在不同定单里对应几十种工序
+      （gx=1 有 67 种：领子绷针 / 平机踩领 / 包肩 / 上胶…），
+      按数字汇总会把毫不相干的工序混成一堆。
+      反过来同一个工序名会跨几千个定单（如「裤线头」4272 个），
+      按名字汇总才有业务意义。
+      name 为空的（2004 年老定单无工序记录）单独归到「(未命名)」。
     """
     cols = {"zdno": "zdno", "ygno": "ygno", "gx": "gx", "day": "gzday"}
     col = cols.get(dim, "zdno")
-    # 只有按员工/工序分组时才有"名称"可言，其他维度留空
-    kname = "MAX(ygname)" if dim == "ygno" else "''"
-    src = "FROM jfgz_report"
+    limit = int(limit)
     if dim == "gx":
-        kname = "COALESCE(MAX(p.gxname),'')"
-        src = ("FROM jfgz_report r LEFT JOIN process p "
-               "ON p.zdno=r.zdno AND p.gx=r.gx")
         rows = get_conn().execute(
-            f"SELECT r.{col} k, {kname} kname, COUNT(*) recs,"
-            f" SUM(r.js) pcs, SUM(r.je) amt {src}"
-            f" WHERE r.gzday>=? AND r.gzday<=?"
-            f" GROUP BY r.{col} ORDER BY pcs DESC LIMIT {int(limit)}",
+            "SELECT COALESCE(NULLIF(p.gxname,''),'(未命名)') k, "
+            "       '' kname, COUNT(*) recs, SUM(r.js) pcs, SUM(r.je) amt "
+            "FROM jfgz_report r "
+            "LEFT JOIN process p ON p.zdno=r.zdno AND p.gx=r.gx "
+            "WHERE r.gzday>=? AND r.gzday<=? "
+            f"GROUP BY COALESCE(NULLIF(p.gxname,''),'(未命名)') "
+            f"ORDER BY pcs DESC LIMIT {limit}",
             (dfrom, dto)).fetchall()
         return [dict(r) for r in rows]
+    kname = "MAX(ygname)" if dim == "ygno" else "''"
     rows = get_conn().execute(
         f"SELECT {col} k, {kname} kname, COUNT(*) recs, SUM(js) pcs, SUM(je) amt"
-        f" {src} WHERE gzday>=? AND gzday<=?"
-        f" GROUP BY {col} ORDER BY pcs DESC LIMIT {int(limit)}",
+        f" FROM jfgz_report WHERE gzday>=? AND gzday<=?"
+        f" GROUP BY {col} ORDER BY pcs DESC LIMIT {limit}",
         (dfrom, dto)).fetchall()
     return [dict(r) for r in rows]
 
@@ -593,21 +598,27 @@ def report_mine(dfrom, dto, ygno, limit=100):
     # 工序名从本地 process 表关联拿（它就是 jfdj 推下来的，主键 zdno+gx）。
     # 实测能覆盖 99.9% 的历史记录；剩下 0.1% 是 2004 年老定单，
     # jfdj 里压根没有对应工序，显示"—"是如实反映。
+    # 颜色从 bundle 表关联（同一定单一扎只有一个颜色，bundle 主键含 yn）。
     hist = [dict(r) for r in get_conn().execute(
         "SELECT r.gzdate, r.zdno, r.gx, r.cc, r.zh, r.js, r.je, "
-        "       COALESCE(p.gxname,'') gxname, 'synced' src "
+        "       COALESCE(p.gxname,'') gxname, "
+        "       COALESCE(b.yn,'') yn, 'synced' src "
         "FROM jfgz_report r "
         "LEFT JOIN process p ON p.zdno=r.zdno AND p.gx=r.gx "
+        "LEFT JOIN (SELECT zdno,cc,zh,MIN(yn) yn FROM bundle GROUP BY zdno,cc,zh) b "
+        "       ON b.zdno=r.zdno AND b.cc=r.cc AND b.zh=r.zh "
         "WHERE r.ygno=? AND r.gzday>=? AND r.gzday<=? "
         "ORDER BY r.gzdate DESC, r.jfgzid DESC LIMIT ?",
         (ygno, dfrom, dto, int(limit))).fetchall()]
     local = [dict(r) for r in get_conn().execute(
-        "SELECT gzdate, zdno, gx, cc, zh, js, je, "
-        "       COALESCE(NULLIF(gxname,''),(SELECT p.gxname FROM process p "
-        "                    WHERE p.zdno=report.zdno AND p.gx=report.gx)) gxname, "
-        "       status src FROM report"
-        " WHERE ygno=? AND date(gzdate)>=? AND date(gzdate)<=? AND jfgzid IS NULL"
-        " ORDER BY gzdate DESC, id DESC LIMIT ?",
+        "SELECT r.gzdate, r.zdno, r.gx, r.cc, r.zh, r.js, r.je, "
+        "       COALESCE(NULLIF(r.gxname,''),(SELECT p.gxname FROM process p "
+        "                    WHERE p.zdno=r.zdno AND p.gx=r.gx)) gxname, "
+        "       COALESCE((SELECT MIN(yn) FROM bundle b "
+        "                 WHERE b.zdno=r.zdno AND b.cc=r.cc AND b.zh=r.zh),'') yn, "
+        "       r.status src FROM report r"
+        " WHERE r.ygno=? AND date(r.gzdate)>=? AND date(r.gzdate)<=? AND r.jfgzid IS NULL"
+        " ORDER BY r.gzdate DESC, r.id DESC LIMIT ?",
         (ygno, dfrom, dto, int(limit))).fetchall()]
     # 本地暂存的时间戳带时分秒，历史只有日期，统一截断到分钟便于排序
     def _key(r):
