@@ -542,8 +542,8 @@ def page_change_apply(rep, token, err="", mine=None):
             + (f'<p class="muted">驳回原因：{esc(mine["approve_note"] or "")}</p>'
                if st == "rejected" else "")
             + f'<p class="muted">{esc(mine["created_at"])}</p></div>')
-        body.append('<div class="card"><a href="/m?short_id='
-                    + esc(rep["short_id"] or "") + '&t=' + esc(token) + '">'
+        body.append('<div class="card"><a href="/s/'
+                    + esc(rep["short_id"] or "") + '?t=' + esc(token) + '">'
                     '<button class="ghost">← 返回扫码页</button></a></div>')
         return _page_shell("修改报工数量", "".join(body))
 
@@ -557,7 +557,7 @@ def page_change_apply(rep, token, err="", mine=None):
         f'<label>改量理由（必填，主管要凭这个判断）</label>'
         f'<input name="reason" placeholder="例如：少算了 5 件，实际只裁了 45 件" required>'
         f'<button type="submit">提交审批</button>'
-        f'<a href="/m?short_id=' + esc(rep["short_id"] or "") + '&t=' + esc(token) + '">'
+        f'<a href="/s/' + esc(rep["short_id"] or "") + '?t=' + esc(token) + '">'
         f'<button type="button" class="ghost">取消</button></a></form>')
     if err:
         body.insert(1, f'<div class="err">{esc(err)}</div>')
