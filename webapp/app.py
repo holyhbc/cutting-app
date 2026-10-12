@@ -1329,10 +1329,12 @@ class Handler(BaseHTTPRequestHandler):
                for r in rows]
         total = f'共 {len(rows)} 组'
         dimname = {"zdno": "定单", "ygno": "员工", "gx": "工序", "day": "日期"}[dim]
+        # 第二列的含义跟着分组维度走：按员工是姓名，按工序是工序名
+        kname = {"ygno": "姓名", "gx": "工序名称"}.get(dim, "")
+        heads = [dimname] + ([kname] if kname else []) + ["次数", "件数", "金额"]
         sub = f"{dfrom} ~ {dto}　按{dimname}　{total}"
         return self._send(200, page_report_table(
-            "计件工资" if is_sup else "我的工资", sub,
-            [dimname, "姓名", "次数", "件数", "金额"], trs, tok, "/report"))
+            "计件工资" if is_sup else "我的工资", sub, heads, trs, tok, "/report"))
 
     def _handle_snapshot(self):
         """局域网同步器推送只读快照。需 Bearer 令牌，防止外部乱写。"""

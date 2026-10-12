@@ -507,28 +507,51 @@ def report_meta():
 
 
 def report_group(dim, dfrom, dto, limit=20000):
-    """多维汇总：dim in (zdno, ygno, gx, day)。ygno 维度带姓名。"""
+    """多维汇总：dim in (zdno, ygno, gx, day)。
+
+    ygno 维度带员工姓名；gx 维度带工序名（从本地 process 表关联，
+    它就是 jfdj 推下来的，主键 zdno+gx，实测覆盖 99.9% 的历史记录）。
+    """
     cols = {"zdno": "zdno", "ygno": "ygno", "gx": "gx", "day": "gzday"}
     col = cols.get(dim, "zdno")
-    # 只有按员工分组时才有"姓名"可言，其他维度留空
+    # 只有按员工/工序分组时才有"名称"可言，其他维度留空
     kname = "MAX(ygname)" if dim == "ygno" else "''"
+    src = "FROM jfgz_report"
+    if dim == "gx":
+        kname = "COALESCE(MAX(p.gxname),'')"
+        src = ("FROM jfgz_report r LEFT JOIN process p "
+               "ON p.zdno=r.zdno AND p.gx=r.gx")
+        rows = get_conn().execute(
+            f"SELECT r.{col} k, {kname} kname, COUNT(*) recs,"
+            f" SUM(r.js) pcs, SUM(r.je) amt {src}"
+            f" WHERE r.gzday>=? AND r.gzday<=?"
+            f" GROUP BY r.{col} ORDER BY pcs DESC LIMIT {int(limit)}",
+            (dfrom, dto)).fetchall()
+        return [dict(r) for r in rows]
     rows = get_conn().execute(
         f"SELECT {col} k, {kname} kname, COUNT(*) recs, SUM(js) pcs, SUM(je) amt"
-        f" FROM jfgz_report WHERE gzday>=? AND gzday<=?"
+        f" {src} WHERE gzday>=? AND gzday<=?"
         f" GROUP BY {col} ORDER BY pcs DESC LIMIT {int(limit)}",
         (dfrom, dto)).fetchall()
     return [dict(r) for r in rows]
 
 
 def report_wage(dfrom, dto, ygno=None):
-    """计件工资（口径 A：直接 SUM(je)，和入库金额一致）。"""
-    sql = ("SELECT ygno, MAX(ygname) ygname, gx, COUNT(*) recs, SUM(js) pcs, SUM(je) amt"
-           " FROM jfgz_report WHERE gzday>=? AND gzday<=?")
+    """计件工资（口径 A：直接 SUM(je)，和入库金额一致）。
+
+    带上工序名称，财务核对时不用再对着 gx 编号猜是哪道工序。
+    """
+    sql = ("SELECT r.ygno, MAX(r.ygname) ygname, r.gx, "
+           "       COALESCE(MAX(p.gxname),'') gxname, "
+           "       COUNT(*) recs, SUM(r.js) pcs, SUM(r.je) amt "
+           "FROM jfgz_report r "
+           "LEFT JOIN process p ON p.zdno=r.zdno AND p.gx=r.gx "
+           "WHERE r.gzday>=? AND r.gzday<=?")
     args = [dfrom, dto]
     if ygno:
-        sql += " AND ygno=?"
+        sql += " AND r.ygno=?"
         args.append(ygno)
-    sql += " GROUP BY ygno, gx ORDER BY ygno, gx"
+    sql += " GROUP BY r.ygno, r.gx ORDER BY r.ygno, r.gx"
     return [dict(r) for r in get_conn().execute(sql, args).fetchall()]
 
 
@@ -567,12 +590,22 @@ def report_mine(dfrom, dto, ygno, limit=100):
       2. report      —— 本地暂存，还没写回 jfgz 的（jfgzid 为空）
     第 2 类才是刚报的那几条，缺了它工人要等一天才看得到自己报了什么。
     """
+    # 工序名从本地 process 表关联拿（它就是 jfdj 推下来的，主键 zdno+gx）。
+    # 实测能覆盖 99.9% 的历史记录；剩下 0.1% 是 2004 年老定单，
+    # jfdj 里压根没有对应工序，显示"—"是如实反映。
     hist = [dict(r) for r in get_conn().execute(
-        "SELECT gzdate, zdno, gx, cc, zh, js, je, '' gxname, 'synced' src FROM jfgz_report"
-        " WHERE ygno=? AND gzday>=? AND gzday<=? ORDER BY gzdate DESC, jfgzid DESC"
-        " LIMIT ?", (ygno, dfrom, dto, int(limit))).fetchall()]
+        "SELECT r.gzdate, r.zdno, r.gx, r.cc, r.zh, r.js, r.je, "
+        "       COALESCE(p.gxname,'') gxname, 'synced' src "
+        "FROM jfgz_report r "
+        "LEFT JOIN process p ON p.zdno=r.zdno AND p.gx=r.gx "
+        "WHERE r.ygno=? AND r.gzday>=? AND r.gzday<=? "
+        "ORDER BY r.gzdate DESC, r.jfgzid DESC LIMIT ?",
+        (ygno, dfrom, dto, int(limit))).fetchall()]
     local = [dict(r) for r in get_conn().execute(
-        "SELECT gzdate, zdno, gx, cc, zh, js, je, gxname, status src FROM report"
+        "SELECT gzdate, zdno, gx, cc, zh, js, je, "
+        "       COALESCE(NULLIF(gxname,''),(SELECT p.gxname FROM process p "
+        "                    WHERE p.zdno=report.zdno AND p.gx=report.gx)) gxname, "
+        "       status src FROM report"
         " WHERE ygno=? AND date(gzdate)>=? AND date(gzdate)<=? AND jfgzid IS NULL"
         " ORDER BY gzdate DESC, id DESC LIMIT ?",
         (ygno, dfrom, dto, int(limit))).fetchall()]
