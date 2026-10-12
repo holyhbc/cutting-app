@@ -259,6 +259,9 @@ def page_scan(smap, view, err="", done="", me=None, prefer_gx=None, token="", la
 <div class="card">
   <p class="muted">标签二维码短ID：{esc(smap['short_id'])}</p>
 </div>
+
+{f'<div class="card"><a href="/report?t={esc(token)}">'
+  '<button class="ghost">📊 查看我的报工</button></a></div>' if me else ''}
 </div>
 
 {ok_mask}
@@ -1185,13 +1188,48 @@ class Handler(BaseHTTPRequestHandler):
             return self._redirect_login()
         dfrom = self._q("from", _today_minus(30)) or _today_minus(30)
         dto = self._q("to", _today()) or _today()
-        rows = D.report_mine(dfrom, dto, me["ygno"], 200)
-        trs = [[r["gzdate"][:16], r["zdno"], r["gx"],
-                f'{r["cc"]}-{r["zh"]}', r["js"], f'{r["je"]:.2f}'] for r in rows]
-        sub = f"{dfrom} ~ {dto}　共 {len(rows)} 条"
-        return self._send(200, page_report_table(
-            "我的报工", sub, ["时间", "定单", "工序", "扎", "件数", "金额"],
-            trs, tok, "/report"))
+        rows = D.report_mine(dfrom, dto, me["ygno"], 300)
+        summ = D.report_mine_summary(dfrom, dto, me["ygno"])
+        trs = [[str(r["gzdate"])[:16], r["zdno"], r["gx"],
+                f'{r["cc"]}-{r["zh"]}', r["js"], f'{float(r["je"] or 0):.2f}',
+                ('<span class="pill">待同步</span>'
+                 if r.get("src") in ("pending", "failed") else "已同步")]
+               for r in rows]
+        head = (f'<div class="card"><h1>👤 我的报工</h1>'
+                f'<p class="sub">{esc(me["ygname"])}（{esc(me["ygno"])}）　'
+                f'{dfrom} ~ {dto}</p>'
+                f'<div class="kv"><span class="k">报工笔数</span>'
+                f'<span class="v">{summ["cnt"]}</span></div>'
+                f'<div class="kv"><span class="k">合计件数</span>'
+                f'<span class="v">{summ["pcs"]:,} 件</span></div>'
+                f'<div class="kv"><span class="k">合计金额</span>'
+                f'<span class="v">{summ["amt"]:,.2f}</span></div>'
+                + (f'<p class="sub" style="margin-top:8px">'
+                   f'其中 {summ["pending"]} 笔还没同步到服务器，'
+                   f'不影响计件，等当天同步后自动并入。</p>'
+                   if summ["pending"] else "")
+                + '<form method="GET" action="/report/mine" style="margin-top:10px">'
+                  f'<input type="hidden" name="t" value="{esc(tok)}">'
+                  '<p class="sub" style="margin:6px 0 4px">开始</p>'
+                  f'<input type="date" name="from" value="{esc(dfrom)}" style="width:100%">'
+                  '<p class="sub" style="margin:8px 0 4px">结束</p>'
+                  f'<input type="date" name="to" value="{esc(dto)}" style="width:100%">'
+                  '<button type="submit" class="ghost" style="margin-top:10px">'
+                  '按这个时间段查</button></form>'
+                + f'<a href="/report?t={esc(tok)}">'
+                  f'<button class="ghost">← 返回报表</button></a></div>')
+        body = [head]
+        if not rows:
+            body.append('<div class="card"><p class="muted">'
+                        '这段时间没有报工记录。</p></div>')
+            return self._send(200, _page_shell("我的报工", "".join(body)))
+        cells = "".join(f"<th>{esc(h)}</th>" for h in
+                        ["时间", "定单", "工序", "扎", "件数", "金额", "状态"])
+        tr_html = "".join("<tr>" + "".join(f"<td>{c}</td>" for c in t) + "</tr>"
+                          for t in trs)
+        body.append('<div class="card" style="overflow-x:auto"><table>'
+                    f'<tr>{cells}</tr>{tr_html}</table></div>')
+        return self._send(200, _page_shell("我的报工", "".join(body)))
 
     def _handle_report_progress(self):
         """定单进度（仅主管）。"""

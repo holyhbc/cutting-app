@@ -560,9 +560,35 @@ def report_progress(zdno):
 
 
 def report_mine(dfrom, dto, ygno, limit=100):
-    """某工人的报工明细（自助查询）。"""
-    rows = get_conn().execute(
-        "SELECT gzdate, zdno, gx, cc, zh, js, je FROM jfgz_report"
+    """某工人的报工明细（自助查询）。
+
+    必须合并两个来源，否则工人报完工来看会「什么都没有」：
+      1. jfgz_report —— 从 SQL Server 推回来的历史（已同步的）
+      2. report      —— 本地暂存，还没写回 jfgz 的（jfgzid 为空）
+    第 2 类才是刚报的那几条，缺了它工人要等一天才看得到自己报了什么。
+    """
+    hist = [dict(r) for r in get_conn().execute(
+        "SELECT gzdate, zdno, gx, cc, zh, js, je, 'synced' src FROM jfgz_report"
         " WHERE ygno=? AND gzday>=? AND gzday<? ORDER BY gzdate DESC, jfgzid DESC"
-        " LIMIT ?", (ygno, dfrom, dto, int(limit))).fetchall()
-    return [dict(r) for r in rows]
+        " LIMIT ?", (ygno, dfrom, dto, int(limit))).fetchall()]
+    local = [dict(r) for r in get_conn().execute(
+        "SELECT gzdate, zdno, gx, cc, zh, js, je, status src FROM report"
+        " WHERE ygno=? AND gzdate>=? AND gzdate<? AND jfgzid IS NULL"
+        " ORDER BY gzdate DESC, id DESC LIMIT ?",
+        (ygno, dfrom, dto, int(limit))).fetchall()]
+    # 本地暂存的时间戳带时分秒，历史只有日期，统一截断到分钟便于排序
+    def _key(r):
+        return (str(r["gzdate"]), r["zdno"])
+    merged = sorted(hist + local, key=_key, reverse=True)
+    return merged[:int(limit)]
+
+
+def report_mine_summary(dfrom, dto, ygno):
+    """某工人在指定范围的合计（件数/金额/笔数），含未同步的本地暂存。"""
+    rows = report_mine(dfrom, dto, ygno, limit=100000)
+    return {
+        "cnt": len(rows),
+        "pcs": sum(int(r["js"] or 0) for r in rows),
+        "amt": sum(float(r["je"] or 0) for r in rows),
+        "pending": sum(1 for r in rows if r.get("src") in ("pending", "failed")),
+    }
