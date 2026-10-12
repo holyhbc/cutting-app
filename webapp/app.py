@@ -293,15 +293,35 @@ function doLogin(){{
         body:JSON.stringify({{account:acc,pin:pin}})}})
     .then(function(r){{return r.json();}})
     .then(function(d){{
-      if(d.ok){{ try{{ localStorage.setItem('scan_token', d.token); }}catch(e){{}} location.reload(); }}
+      if(d.ok){{
+        try{{ localStorage.setItem('scan_token', d.token); }}catch(e){{}}
+        // 关键：必须把令牌放进 URL 再跳转。
+        // 服务端只认 ?t= 参数，不读 localStorage；
+        // 光存 localStorage 再 reload 的话，页面刷新后服务端仍然查不到令牌，
+        // 会又显示登录框，看起来就像「登录无效」。
+        location.href = location.pathname + '?t=' + encodeURIComponent(d.token);
+      }}
       else alert(d.msg||'登录失败');
     }}).catch(function(){{ alert('网络错误'); }});
 }}
+// 页面打开时：URL 没带令牌但 localStorage 里有，就补上。
+// 这样从二维码进来、已登录过的工人不用每次都重新登录。
+(function(){{
+  var m=location.search.match(/[?&]t=([^&]+)/);
+  if(m){{ try{{ localStorage.setItem('scan_token', decodeURIComponent(m[1])); }}catch(e){{}} return; }}
+  var t='';
+  try{{ t=localStorage.getItem('scan_token')||''; }}catch(e){{}}
+  if(t) location.replace(location.pathname + '?t=' + encodeURIComponent(t));
+}})();
 function logout(){{
   var t=(document.getElementById('token')||{{}}).value||localStorage.getItem('scan_token');
   fetch('/api/logout',{{method:'POST',headers:{{'Content-Type':'application/json'}},
         body:JSON.stringify({{token:t}})}})
-    .then(function(){{ try{{ localStorage.removeItem('scan_token'); }}catch(e){{}} location.href='/'; }});
+    .then(function(){{
+      try{{ localStorage.removeItem('scan_token'); }}catch(e){{}}
+      // 必须跳到不带 ?t= 的地址，否则刷新后令牌又被读回来，等于没退出
+      location.href = location.pathname;
+    }});
 }}
 
 // 记忆命中：自动选中并预填剩余数
