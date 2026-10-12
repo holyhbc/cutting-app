@@ -1219,8 +1219,14 @@ class Handler(BaseHTTPRequestHandler):
         dto = self._q("to", _today()) or _today()
         rows = D.report_mine(dfrom, dto, me["ygno"], 300)
         summ = D.report_mine_summary(dfrom, dto, me["ygno"])
-        trs = [[str(r["gzdate"])[:16], r["zdno"], r["gx"],
-                f'{r["cc"]}-{r["zh"]}', r["js"], f'{float(r["je"] or 0):.2f}',
+        # 「扎」按工人熟悉的口径显示：标签上印的是扎号(zh)，不是 cc-zh。
+        # cc 是定单内的车间层序号，只有报表/对账才需要，所以放到小字备注里。
+        trs = [[str(r["gzdate"])[:16], r["zdno"],
+                (f'{r["gx"]}·{r["gxname"]}' if r.get("gxname") else str(r["gx"])),
+                (f'{r["zh"]}'
+                 f'<div style="font-size:11px;color:#888">第{r["cc"]}层</div>'
+                 if r.get("cc") else str(r.get("zh") or "-")),
+                r["js"], f'{float(r["je"] or 0):.2f}',
                 ('<span class="pill">待同步</span>'
                  if r.get("src") in ("pending", "failed") else "已同步")]
                for r in rows]

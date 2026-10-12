@@ -568,11 +568,11 @@ def report_mine(dfrom, dto, ygno, limit=100):
     第 2 类才是刚报的那几条，缺了它工人要等一天才看得到自己报了什么。
     """
     hist = [dict(r) for r in get_conn().execute(
-        "SELECT gzdate, zdno, gx, cc, zh, js, je, 'synced' src FROM jfgz_report"
+        "SELECT gzdate, zdno, gx, cc, zh, js, je, '' gxname, 'synced' src FROM jfgz_report"
         " WHERE ygno=? AND gzday>=? AND gzday<=? ORDER BY gzdate DESC, jfgzid DESC"
         " LIMIT ?", (ygno, dfrom, dto, int(limit))).fetchall()]
     local = [dict(r) for r in get_conn().execute(
-        "SELECT gzdate, zdno, gx, cc, zh, js, je, status src FROM report"
+        "SELECT gzdate, zdno, gx, cc, zh, js, je, gxname, status src FROM report"
         " WHERE ygno=? AND date(gzdate)>=? AND date(gzdate)<=? AND jfgzid IS NULL"
         " ORDER BY gzdate DESC, id DESC LIMIT ?",
         (ygno, dfrom, dto, int(limit))).fetchall()]
