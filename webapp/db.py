@@ -514,7 +514,7 @@ def report_group(dim, dfrom, dto, limit=20000):
     kname = "MAX(ygname)" if dim == "ygno" else "''"
     rows = get_conn().execute(
         f"SELECT {col} k, {kname} kname, COUNT(*) recs, SUM(js) pcs, SUM(je) amt"
-        f" FROM jfgz_report WHERE gzday>=? AND gzday<?"
+        f" FROM jfgz_report WHERE gzday>=? AND gzday<=?"
         f" GROUP BY {col} ORDER BY pcs DESC LIMIT {int(limit)}",
         (dfrom, dto)).fetchall()
     return [dict(r) for r in rows]
@@ -523,7 +523,7 @@ def report_group(dim, dfrom, dto, limit=20000):
 def report_wage(dfrom, dto, ygno=None):
     """计件工资（口径 A：直接 SUM(je)，和入库金额一致）。"""
     sql = ("SELECT ygno, MAX(ygname) ygname, gx, COUNT(*) recs, SUM(js) pcs, SUM(je) amt"
-           " FROM jfgz_report WHERE gzday>=? AND gzday<?")
+           " FROM jfgz_report WHERE gzday>=? AND gzday<=?")
     args = [dfrom, dto]
     if ygno:
         sql += " AND ygno=?"
@@ -535,7 +535,7 @@ def report_wage(dfrom, dto, ygno=None):
 def report_detail(dfrom, dto, zdno=None, ygno=None, gx=None, limit=300):
     """报工明细（手机上只取最近 limit 条）。"""
     sql = ("SELECT gzdate, ygno, ygname, zdno, gx, cc, zh, js, je"
-           " FROM jfgz_report WHERE gzday>=? AND gzday<?")
+           " FROM jfgz_report WHERE gzday>=? AND gzday<=?")
     args = [dfrom, dto]
     if zdno:
         sql += " AND zdno=?"
@@ -569,11 +569,11 @@ def report_mine(dfrom, dto, ygno, limit=100):
     """
     hist = [dict(r) for r in get_conn().execute(
         "SELECT gzdate, zdno, gx, cc, zh, js, je, 'synced' src FROM jfgz_report"
-        " WHERE ygno=? AND gzday>=? AND gzday<? ORDER BY gzdate DESC, jfgzid DESC"
+        " WHERE ygno=? AND gzday>=? AND gzday<=? ORDER BY gzdate DESC, jfgzid DESC"
         " LIMIT ?", (ygno, dfrom, dto, int(limit))).fetchall()]
     local = [dict(r) for r in get_conn().execute(
         "SELECT gzdate, zdno, gx, cc, zh, js, je, status src FROM report"
-        " WHERE ygno=? AND gzdate>=? AND gzdate<? AND jfgzid IS NULL"
+        " WHERE ygno=? AND date(gzdate)>=? AND date(gzdate)<=? AND jfgzid IS NULL"
         " ORDER BY gzdate DESC, id DESC LIMIT ?",
         (ygno, dfrom, dto, int(limit))).fetchall()]
     # 本地暂存的时间戳带时分秒，历史只有日期，统一截断到分钟便于排序

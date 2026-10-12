@@ -698,19 +698,39 @@ document.getElementById('pin').addEventListener('keydown',function(e){{
 # ==================== 阶段4 · 报表页（手机） ====================
 
 def page_report_home(me, meta, token, is_sup):
-    """报表首页：选类型 + 数据截至时间。"""
+    """报表首页：选类型 + 数据截至时间。
+
+    全局统计（13万条报工 / 1万定单 / 135人）**只给主管看**。
+    普通工人看到这种全局数字会误以为是自己���历史数据，
+    而且本来也不该知道全厂的报工总量。
+    """
     synced = D.get_sync_meta("jfgz_synced_at", "")
-    body = [f'<div class="card"><h1>📊 统计报表</h1>'
-            f'<p class="sub">{esc(me["ygname"])}（{esc(me["ygno"])}）</p>'
-            f'<div class="kv"><span class="k">报工记录</span>'
-            f'<span class="v">{meta["n"]:,}</span></div>'
-            f'<div class="kv"><span class="k">定单数</span>'
-            f'<span class="v">{meta["nzd"]:,}</span></div>'
-            f'<div class="kv"><span class="k">数据范围</span>'
-            f'<span class="v">{esc(meta["d0"] or "-")} ~ {esc(meta["d1"] or "-")}</span></div>'
-            f'<div class="kv"><span class="k">数据截至</span>'
-            f'<span class="v">{esc(synced or "尚未同步")}</span></div></div>']
-    if not meta["n"]:
+    if is_sup:
+        body = [f'<div class="card"><h1>📊 统计报表</h1>'
+                f'<p class="sub">主管：{esc(me["ygname"])}（{esc(me["ygno"])}）</p>'
+                f'<div class="kv"><span class="k">全厂报工记录</span>'
+                f'<span class="v">{meta["n"]:,}</span></div>'
+                f'<div class="kv"><span class="k">定单数</span>'
+                f'<span class="v">{meta["nzd"]:,}</span></div>'
+                f'<div class="kv"><span class="k">数据范围</span>'
+                f'<span class="v">{esc(meta["d0"] or "-")} ~ {esc(meta["d1"] or "-")}</span></div>'
+                f'<div class="kv"><span class="k">数据截至</span>'
+                f'<span class="v">{esc(synced or "尚未同步")}</span></div></div>']
+    else:
+        # 普通工人只看自己的，避免把全厂数据误当成自己的历史
+        summ = D.report_mine_summary(_today_minus(30), _today(), me["ygno"])
+        body = [f'<div class="card"><h1>📊 我的统计</h1>'
+                f'<p class="sub">{esc(me["ygname"])}（{esc(me["ygno"])}）'
+                f'　近30天</p>'
+                f'<div class="kv"><span class="k">报工笔数</span>'
+                f'<span class="v">{summ["cnt"]}</span></div>'
+                f'<div class="kv"><span class="k">合计件数</span>'
+                f'<span class="v">{summ["pcs"]:,} 件</span></div>'
+                f'<div class="kv"><span class="k">合计金额</span>'
+                f'<span class="v">{summ["amt"]:,.2f}</span></div></div>']
+    # 没数据时，工人不该看到「暂无报工数据，请运行推送」这种运维提示
+    # （本地暂存的报工照样是他自己的数据）。只有主管需要知道推送状态。
+    if not meta["n"] and is_sup:
         body.append('<div class="card"><p class="muted">'
                     '暂无报工数据，请班组长在电脑上运行「报表数据推送」。</p></div>')
         return _page_shell("统计报表", "".join(body))
