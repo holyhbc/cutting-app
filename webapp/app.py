@@ -525,6 +525,90 @@ def page_home(st):
 </div></body></html>"""
 
 
+def page_admin(st, token):
+    """主管后台：一眼看清还有什么没处理。"""
+    body = [f'<div class="card"><h1>⚙️ 主管后台</h1>'
+            f'<p class="sub">这些是需要人工处理的事务</p></div>']
+
+    # 需要处理的（红），只是统计的（普通）
+    need = [
+        ("failed", "同步失败", "report", "danger", f'{st["failed"]} 条报工写不进数据库'),
+        ("pending", "待同步", "report", "warn", f'{st["pending"]} 条等局域网同步器写回'),
+        ("change_pending", "待审批改量", "change", "warn",
+         f'{st["change_pending"]} 条改量申请等你处理'),
+        ("change_unsynced", "待回写", "change", "warn",
+         f'{st["change_unsynced"]} 条已批准的改量还没写回数据库'),
+    ]
+    items = ""
+    for key, title, kind, tone, desc in need:
+        n = st[key]
+        mark = f'<span class="pill no">{n}</span>' if n else '<span class="pill ok">0</span>'
+        color = "#c0392b" if (n and tone == "danger") else "#b26a00"
+        items += (f'<a class="btn ghost" style="text-align:left;border-left:4px solid {color}" '
+                  f'href="/admin/{kind}?t={esc(token)}">'
+                  f'<div style="display:flex;justify-content:space-between;align-items:center">'
+                  f'<span style="font-weight:600;color:#1a73a8">{title}</span>{mark}</div>'
+                  f'<div style="font-size:13px;color:#666">{desc}</div></a>')
+    body.append(f'<div class="card"><h2>待处理</h2>{items}</div>')
+
+    ok = ""
+    for key, title, desc in (
+        ("synced", "已同步报工", f'{st["synced"]} 条已写回 SQL Server'),
+        ("workers", "在职账号", f'{st["workers"]} 个工人可登录'),
+        ("sessions", "登录令牌", f'{st["sessions"]} 个有效令牌'),
+    ):
+        ok += (f'<div class="kv"><span class="k">{title}</span>'
+               f'<span class="v">{desc}</span></div>')
+    body.append(f'<div class="card"><h2>概况</h2>{ok}'
+                + (f'<div class="kv"><span class="k">最早未同步</span>'
+                   f'<span class="v">{esc(st["oldest"])}</span></div>'
+                   if st["oldest"] else "")
+                + '</div>')
+
+    body.append(f'<div class="card">'
+                f'<a class="btn ghost" href="/approve?t={esc(token)}">✅ 改量审批</a>'
+                f'<a class="btn ghost" href="/report/orders?t={esc(token)}">📋 在手定单</a>'
+                f'<a class="btn ghost" href="/report?t={esc(token)}">← 返回报表</a></div>')
+    return _page_shell("主管后台", "".join(body))
+
+
+def page_admin_reports(rows, token, kind):
+    """待同步 / 同步失败 报工列表。"""
+    is_fail = (kind == "failed")
+    title = "同步失败" if is_fail else "待同步报工"
+    cells = ""
+    if rows:
+        cells = "".join(f"<th>{esc(h)}</th>" for h in
+                        ["报工人", "定单", "扎", "工序", "件数", "时间", "说明"])
+        trs = ""
+        for r in rows:
+            err = (r.get("last_err") or "").strip()
+            trs += (f'<tr><td>{esc(r["ygname"] or r["ygno"])}</td>'
+                    f'<td>{esc(r["zdno"])}</td>'
+                    f'<td>{r["cc"]}-{r["zh"]}</td>'
+                    f'<td>{r["gx"]} {esc(r["gxname"] or "")}</td>'
+                    f'<td>{r["js"]}</td>'
+                    f'<td>{esc(str(r["gzdate"])[:16])}</td>'
+                    f'<td style="white-space:normal;max-width:160px;font-size:12px;'
+                    f'color:#c0392b">{esc(err[:60])}</td></tr>')
+        table = (f'<div style="overflow-x:auto"><table class="rep">'
+                 f'<tr>{cells}</tr>{trs}</table></div>')
+    else:
+        table = '<p class="muted">没有记录，都处理完了。</p>'
+    body = [f'<div class="card"><h1>{title}</h1>'
+            f'<p class="sub">共 {len(rows)} 条</p>'
+            f'<a class="btn ghost" href="/admin?t={esc(token)}">← 返回后台</a></div>',
+            f'<div class="card">{table}</div>',
+            f'<div class="card"><p class="muted">'
+            + ('<b>怎么办</b>：这些报工被服务器拒绝了（超量、工序不存在等），'
+               '需要班组长在电脑上处理，或让工人走「改量审批」重新报。'
+               if is_fail else
+               '<b>怎么办</b>：等局域网电脑跑一次同步器即可自动写回数据库，'
+               '不用手工处理。')
+            + '</p></div>']
+    return _page_shell(title, "".join(body))
+
+
 def page_pending(rows):
     trs = "".join(
         f"<tr><td>{r['id']}</td><td>{esc(r['zdno'])}</td><td>{r['cc']}</td>"
@@ -757,6 +841,8 @@ def page_report_home(me, meta, token, is_sup):
            f'📈 定单进度</a>' if is_sup else "")
         + (f'<a class="btn" href="/report/orders?t={esc(token)}">'
            f'📋 在手定单</a>' if is_sup else "")
+        + (f'<a class="btn ghost" href="/admin?t={esc(token)}">'
+           f'⚙️ 主管后台</a>' if is_sup else "")
         + (f'<a class="btn" href="/report/wage?t={esc(token)}">'
            f'💰 计件工资</a>' if is_sup else "")
         + '</div>')
@@ -1044,9 +1130,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._handle_report_orders()
             if path == "/report/wage":
                 return self._handle_report_wage()
+            if path == "/admin":
+                return self._handle_admin()
             if path == "/admin/pending":
-                return self._send(200, page_pending(D.list_pending(500)),
-                                  head_only=head_only)
+                return self._handle_admin_pending()
+            if path == "/admin/failed":
+                return self._handle_admin_pending()
             if path.startswith("/api/bundle/"):
                 sid = path.rsplit("/", 1)[-1]
                 smap = D.get_scan_map(sid)
@@ -1439,6 +1528,41 @@ class Handler(BaseHTTPRequestHandler):
                     '<div style="overflow-x:auto;margin-top:10px">'
                     f'<table class="rep"><tr>{cells}</tr>{tr_html}</table></div></div>')
         return self._send(200, _page_shell("我的报工", "".join(body)))
+
+    def _require_supervisor(self):
+        """主管后台一律要 SUPERVISORS 权限。
+
+    旧版 /admin/pending 没有任何鉴权，未登录就能看到全部报工的
+    工号/定单/数量，属于信息泄露，这里一并堵上。
+    """
+        me, tok = self._report_user()
+        if not me:
+            return self._redirect_login()
+        if not R.is_supervisor(me["ygno"]):
+            self._send(403, _page_shell("无权限",
+                '<div class="card"><h1>无权限</h1><p class="sub">'
+                '只有主管可以打开后台。</p></div>'))
+            return None
+        return me, tok
+
+    def _handle_admin(self):
+        """主管后台首页。"""
+        auth = self._require_supervisor()
+        if auth is None:
+            return
+        _, tok = auth
+        return self._send(200, page_admin(D.admin_overview(), tok))
+
+    def _handle_admin_pending(self):
+        """待同步 / 同步失败 报工列表。"""
+        auth = self._require_supervisor()
+        if auth is None:
+            return
+        _, tok = auth
+        kind = "failed" if self._q("kind") == "failed" else \
+            ("failed" if "/admin/failed" in self.path else "pending")
+        rows = (D.list_failed(300) if kind == "failed" else D.list_pending(300))
+        return self._send(200, page_admin_reports(rows, tok, kind))
 
     def _handle_report_orders(self):
         """在手定单总览（仅主管）。"""

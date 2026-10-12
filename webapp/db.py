@@ -243,6 +243,37 @@ def list_pending(limit=200):
     return [dict(r) for r in rows]
 
 
+def admin_overview():
+    """主管后台概览：待同步/失败/待审批/待回写，各多少条、最早卡了多久。"""
+    conn = get_conn()
+    out = {}
+    for k, sql in (
+        ("pending", "SELECT COUNT(*) FROM report WHERE status='pending'"),
+        ("failed", "SELECT COUNT(*) FROM report WHERE status='failed'"),
+        ("synced", "SELECT COUNT(*) FROM report WHERE status='synced'"),
+        ("change_pending", "SELECT COUNT(*) FROM change_request WHERE status='pending'"),
+        ("change_unsynced",
+         "SELECT COUNT(*) FROM change_request WHERE status='approved' AND synced=0"),
+        ("workers", "SELECT COUNT(*) FROM worker_login WHERE active=1"),
+        ("sessions", "SELECT COUNT(*) FROM worker_session"),
+    ):
+        out[k] = int(conn.execute(sql).fetchone()[0] or 0)
+    r = conn.execute(
+        "SELECT MIN(gzdate) FROM report WHERE status IN ('pending','failed')").fetchone()
+    out["oldest"] = r[0] if r and r[0] else ""
+    r = conn.execute(
+        "SELECT COALESCE(SUM(js),0) FROM report WHERE status IN ('pending','failed')"
+    ).fetchone()
+    out["waiting_pcs"] = int(r[0] or 0)
+    return out
+
+
+def list_failed(limit=100):
+    rows = get_conn().execute(
+        "SELECT * FROM report WHERE status='failed' ORDER BY id LIMIT ?", (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
 def mark_report(id_, status, jfgzid=None, err=None):
     conn = get_conn()
     if status == "synced":
