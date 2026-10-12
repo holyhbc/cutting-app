@@ -73,6 +73,15 @@ button{width:100%;padding:14px;font-size:17px;font-weight:600;border:0;border-ra
        background:#0a84ff;color:#fff;margin-top:16px}
 button:disabled{background:#ccc}
 button.ghost{background:#f0f0f0;color:#333}
+/* a.btn：把链接做成按钮的样子。
+   不要写 <a><button></a> —— 嵌套的 button 没有 type 时，
+   浏览器会当成 type=submit，点一下就误提交所在的报工表单，
+   触发「要填写报工数量」这类原生校验。 */
+a.btn{display:block;text-align:center;width:100%;padding:13px;
+      border-radius:11px;background:#0a84ff;color:#fff;font-weight:600;
+      font-size:16px;text-decoration:none;margin-bottom:9px;box-sizing:border-box}
+a.btn.ghost{background:#f0f0f0;color:#333}
+a.btn:last-child{margin-bottom:0}
 .proc{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:13px;
       border:1.5px solid #eee;border-radius:11px;margin-bottom:9px;cursor:pointer}
 .proc>div{flex:1 1 auto;min-width:0}
@@ -260,8 +269,8 @@ def page_scan(smap, view, err="", done="", me=None, prefer_gx=None, token="", la
   <p class="muted">标签二维码短ID：{esc(smap['short_id'])}</p>
 </div>
 
-{f'<div class="card"><a href="/report?t={esc(token)}">'
-  '<button class="ghost">📊 查看我的报工</button></a></div>' if me else ''}
+{f'<div class="card"><a class="btn ghost" href="/report?t={esc(token)}">'
+  '📊 查看我的报工</a></div>' if me else ''}
 </div>
 
 {ok_mask}
@@ -441,7 +450,7 @@ def page_notfound(sid=""):
 </div>
 <div class="card">
   <button onclick="history.back()">← 返回上一页</button>
-  <button class="ghost" onclick="openScan()">📷 直接扫一扫</button>
+  <a class="btn ghost" href="/s/">📷 直接扫一扫</a>
 </div>
 </div>
 <div class="mask" id="scanmask">
@@ -553,9 +562,9 @@ def page_change_apply(rep, token, err="", mine=None):
             + (f'<p class="muted">驳回原因：{esc(mine["approve_note"] or "")}</p>'
                if st == "rejected" else "")
             + f'<p class="muted">{esc(mine["created_at"])}</p></div>')
-        body.append('<div class="card"><a href="/s/'
+        body.append('<div class="card"><a class="btn ghost" href="/s/'
                     + esc(rep["short_id"] or "") + '?t=' + esc(token) + '">'
-                    '<button class="ghost">← 返回扫码页</button></a></div>')
+                    '← 返回扫码页</a></div>')
         return _page_shell("修改报工数量", "".join(body))
 
     body.append(
@@ -568,8 +577,8 @@ def page_change_apply(rep, token, err="", mine=None):
         f'<label>改量理由（必填，主管要凭这个判断）</label>'
         f'<input name="reason" placeholder="例如：少算了 5 件，实际只裁了 45 件" required>'
         f'<button type="submit">提交审批</button>'
-        f'<a href="/s/' + esc(rep["short_id"] or "") + '?t=' + esc(token) + '">'
-        f'<button type="button" class="ghost">取消</button></a></form>')
+        f'<a class="btn ghost" href="/s/' + esc(rep["short_id"] or "") + '?t=' + esc(token) + '">'
+        f'取消</a></form>')
     if err:
         body.insert(1, f'<div class="err">{esc(err)}</div>')
     return _page_shell("修改报工数量", "".join(body))
@@ -581,10 +590,10 @@ def page_approve(me, changes, pending, token, tab="pending"):
             f'<p class="sub">主管：{esc(me["ygname"])}（{esc(me["ygno"])}）</p>'
             f'<div class="kv"><span class="k">待审批</span>'
             f'<span class="v"><span class="apbadge">{pending}</span> 条</span></div>'
-            f'<a href="/approve?status=pending&t=' + esc(token) + '">'
-            f'<button class="ghost">待审（{pending}）</button></a>'
-            f'<a href="/approve?status=all&t=' + esc(token) + '">'
-            f'<button class="ghost">全部记录</button></a></div>']
+            f'<a class="btn ghost" href="/approve?status=pending&t=' + esc(token) + '">'
+            f'待审（{pending}）</a>'
+            f'<a class="btn ghost" href="/approve?status=all&t=' + esc(token) + '">'
+            f'全部记录</a></div>']
 
     if not changes:
         body.append('<div class="card"><p class="muted">没有记录</p></div>')
@@ -708,14 +717,14 @@ def page_report_home(me, meta, token, is_sup):
 
     body.append(
         f'<div class="card"><h2>查什么</h2>'
-        f'<a href="/report/mine?t={esc(token)}">'
-        f'<button>👤 我的报工</button></a>'
-        + (f'<a href="/report/progress?t={esc(token)}">'
-           f'<button>📈 定单进度</button></a>' if is_sup else "")
-        + (f'<a href="/report/wage?t={esc(token)}">'
-           f'<button>💰 计件工资</button></a>' if is_sup else "")
+        f'<a class="btn" href="/report/mine?t={esc(token)}">'
+        f'👤 我的报工</a>'
+        + (f'<a class="btn" href="/report/progress?t={esc(token)}">'
+           f'📈 定单进度</a>' if is_sup else "")
+        + (f'<a class="btn" href="/report/wage?t={esc(token)}">'
+           f'💰 计件工资</a>' if is_sup else "")
         + '</div>')
-    body.append(f'<div class="card"><a href="/"><button class="ghost">← 返回首页</button></a></div>')
+    body.append(f'<div class="card"><a class="btn ghost" href="/">← 返回首页</a></div>')
     return _page_shell("统计报表", "".join(body))
 
 
@@ -723,8 +732,8 @@ def page_report_table(title, sub, headers, rows, token, back, total=None):
     """通用报表表格页（手机卡片式，不用宽表格）。"""
     body = [f'<div class="card"><h1>{esc(title)}</h1>'
             f'<p class="sub">{esc(sub)}</p>'
-            f'<a href="{esc(back)}?t={esc(token)}">'
-            f'<button class="ghost">← 返回</button></a></div>']
+            f'<a class="btn ghost" href="{esc(back)}?t={esc(token)}">'
+            f'← 返回</a></div>']
     if not rows:
         body.append('<div class="card"><p class="muted">没有数据</p></div>')
         return _page_shell(title, "".join(body))
@@ -745,8 +754,8 @@ def page_report_prompt(title, token, back, fields, is_sup):
     """报表参数选择页（日期/工号），提交到对应报表页。"""
     opts = "".join(f'<option value="{esc(v)}">{esc(t)}</option>' for v, t in fields)
     body = [f'<div class="card"><h1>{esc(title)}</h1>'
-            f'<a href="{esc(back)}?t={esc(token)}">'
-            f'<button class="ghost">← 返回</button></a></div>',
+            f'<a class="btn ghost" href="{esc(back)}?t={esc(token)}">'
+            f'← 返回</a></div>',
             '<div class="card"><form method="GET" action="' + esc(back) + '">'
             f'<input type="hidden" name="t" value="{esc(token)}">'
             '<p class="sub">开始日期</p>'
@@ -1216,8 +1225,8 @@ class Handler(BaseHTTPRequestHandler):
                   f'<input type="date" name="to" value="{esc(dto)}" style="width:100%">'
                   '<button type="submit" class="ghost" style="margin-top:10px">'
                   '按这个时间段查</button></form>'
-                + f'<a href="/report?t={esc(tok)}">'
-                  f'<button class="ghost">← 返回报表</button></a></div>')
+                + f'<a class="btn ghost" href="/report?t={esc(tok)}">'
+                  f'← 返回报表</a></div>')
         body = [head]
         if not rows:
             body.append('<div class="card"><p class="muted">'
