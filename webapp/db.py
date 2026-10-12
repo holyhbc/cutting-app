@@ -579,6 +579,64 @@ def report_detail(dfrom, dto, zdno=None, ygno=None, gx=None, limit=300):
     return [dict(r) for r in get_conn().execute(sql, args).fetchall()]
 
 
+def report_orders_overview(days=7, limit=100):
+    """在手定单总览：每个定单做到哪了。
+
+    只看最近 days 天有报工的定单（=主管手上在做的），
+    200 多个定单全部铺开手机上一屏放不下，必须有时间窗。
+
+    完工扎数按「最慢工序」判：一扎要所有工序都报满才算完工。
+    未同步的本地暂存也算进去，否则工人报完工这里纹丝不动。
+    """
+    since = _today_minus(int(days))
+    rows = get_conn().execute(
+        # 只保留最近有报工的定单（先缩小范围，后面几次 join 才不会太慢）
+        "WITH active AS (SELECT zdno, MAX(gzday) last_day, COUNT(*) recs, SUM(js) pcs"
+        "            FROM jfgz_report WHERE gzday>=? GROUP BY zdno),"
+        # 该定单「应有的」每扎×每道工序
+        " expect AS (SELECT b.zdno,b.cc,b.zh,b.plan_qty,p.gx"
+        "            FROM bundle b JOIN process p ON p.zdno=b.zdno"
+        "             JOIN active a ON a.zdno=b.zdno"
+        "            GROUP BY b.zdno,b.cc,b.zh,b.plan_qty,p.gx),"
+        # 每道工序的已报 = 已同步 + 未同步本地暂存
+        " per_gx AS ("
+        "  SELECT zdno,cc,zh,gx,SUM(js) d FROM jfgz_report"
+        "   WHERE gzday>=? GROUP BY zdno,cc,zh,gx"
+        "  UNION ALL"
+        "  SELECT zdno,cc,zh,gx,SUM(js) FROM report"
+        "   WHERE jfgzid IS NULL GROUP BY zdno,cc,zh,gx),"
+        # 每扎取「最慢那道工序」，先聚合到扎级。
+        # 必须 LEFT JOIN 到 expect 上：一道工序完全没报过时，
+        # 若只在有报工的工序里取 MIN，等于漏掉它，这扎会被误判成完工。
+        # 也必须先聚成扎级再统计，否则 expect 是「扎×工序」行数，
+        # 直接 COUNT/SUM 会把扎数和应做数放大好几倍。
+        " bundle_agg AS ("
+        "  SELECT e.zdno,e.cc,e.zh,MAX(e.plan_qty) plan_qty,"
+        "         MIN(COALESCE(g.d,0)) mindone"
+        "  FROM expect e LEFT JOIN per_gx g"
+        "    ON g.zdno=e.zdno AND g.cc=e.cc AND g.zh=e.zh AND g.gx=e.gx"
+        "  GROUP BY e.zdno,e.cc,e.zh)"
+        "SELECT a.zdno, a.last_day, a.recs, a.pcs,"
+        "       COUNT(b.zh) nb, COALESCE(SUM(b.plan_qty),0) plan,"
+        "       COALESCE(SUM(CASE WHEN b.mindone>=b.plan_qty THEN 1 ELSE 0 END),0) fin "
+        "FROM active a "
+        "LEFT JOIN bundle_agg b ON b.zdno=a.zdno "
+        "GROUP BY a.zdno, a.last_day, a.recs, a.pcs "
+        "ORDER BY a.last_day DESC, a.pcs DESC LIMIT ?",
+        (since, since, int(limit))).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["rate"] = (d["fin"] / d["nb"] * 100) if d["nb"] else 0
+        out.append(d)
+    return out
+
+
+def _today_minus(n):
+    import datetime
+    return (datetime.date.today() - datetime.timedelta(days=int(n))).isoformat()
+
+
 def report_progress(zdno):
     """定单进度：每道工序的应做/已报/完成率。
 
@@ -591,20 +649,25 @@ def report_progress(zdno):
         "SELECT COALESCE(SUM(plan_qty),0) FROM bundle WHERE zdno=?", (zdno,)).fetchone()[0]
     plan = int(plan or 0)
 # 每扎的应做与「最慢工序」已报。
-    # 一扎的进度取决于所有工序里报得最少的那道（每道工序都要做满应做数），
-    # 不能把各工序累加 —— 9 道工序各报 1272，累加是 11448，毫无意义。
+    # 必须以「应有的 扎×工序」为准再 LEFT JOIN 实际报工：
+    # 若只在有报工的工序里取 MIN，一道工序完全没报过时会被漏掉，
+    # 这扎就被误判成完工了（实测踩过：2道工序只报1道，显示100%）。
     bundles = [dict(r) for r in conn.execute(
-        "SELECT b.zdno, b.cc, b.zh, COALESCE(b.yn,'') yn, b.plan_qty, "
-        "       COALESCE((SELECT MIN(d) FROM ("
-        "           SELECT COALESCE(SUM(x.js),0) d FROM jfgz_report x "
-        "             WHERE x.zdno=b.zdno AND x.cc=b.cc AND x.zh=b.zh GROUP BY x.gx "
-        "           UNION ALL "
-        "           SELECT COALESCE(SUM(y.js),0) FROM report y "
-        "             WHERE y.zdno=b.zdno AND y.cc=b.cc AND y.zh=b.zh "
-        "             AND y.jfgzid IS NULL GROUP BY y.gx) m),0) done, "
-        "       (SELECT COUNT(DISTINCT p.gx) FROM process p WHERE p.zdno=b.zdno) nproc "
-        "FROM bundle b WHERE b.zdno=? GROUP BY b.zdno,b.cc,b.zh,b.yn,b.plan_qty "
-        "ORDER BY b.cc, b.zh", (zdno,)).fetchall()]
+        "SELECT e.zdno, e.cc, e.zh, COALESCE(MAX(b.yn),'') yn, e.plan_qty, "
+        "       MIN(COALESCE(g.d,0)) done "
+        "FROM (SELECT b2.zdno,b2.cc,b2.zh,b2.plan_qty,p.gx "
+        "      FROM bundle b2 JOIN process p ON p.zdno=b2.zdno "
+        "      WHERE b2.zdno=? GROUP BY b2.zdno,b2.cc,b2.zh,b2.plan_qty,p.gx) e "
+        "LEFT JOIN bundle b ON b.zdno=e.zdno AND b.cc=e.cc AND b.zh=e.zh "
+        "LEFT JOIN ("
+        "   SELECT zdno,cc,zh,gx,SUM(js) d FROM jfgz_report "
+        "    WHERE zdno=? GROUP BY zdno,cc,zh,gx "
+        "   UNION ALL "
+        "   SELECT zdno,cc,zh,gx,SUM(js) FROM report "
+        "    WHERE zdno=? AND jfgzid IS NULL GROUP BY zdno,cc,zh,gx) g "
+        "  ON g.zdno=e.zdno AND g.cc=e.cc AND g.zh=e.zh AND g.gx=e.gx "
+        "GROUP BY e.zdno,e.cc,e.zh,e.plan_qty ORDER BY e.cc, e.zh",
+        (zdno, zdno, zdno)).fetchall()]
     # 每道工序（用 process 拿工序名，按名分组避免 gx 歧义）
     procs = [dict(r) for r in conn.execute(
         "SELECT p.gx, p.gxname, p.dj, "

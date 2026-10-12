@@ -755,11 +755,64 @@ def page_report_home(me, meta, token, is_sup):
         f'👤 我的报工</a>'
         + (f'<a class="btn" href="/report/progress?t={esc(token)}">'
            f'📈 定单进度</a>' if is_sup else "")
+        + (f'<a class="btn" href="/report/orders?t={esc(token)}">'
+           f'📋 在手定单</a>' if is_sup else "")
         + (f'<a class="btn" href="/report/wage?t={esc(token)}">'
            f'💰 计件工资</a>' if is_sup else "")
         + '</div>')
     body.append(f'<div class="card"><a class="btn ghost" href="/">← 返回首页</a></div>')
     return _page_shell("统计报表", "".join(body))
+
+
+def page_orders_overview(rows, token, days):
+    """在手定单总览。"""
+    fin = [r for r in rows if r["rate"] >= 100]
+    doing = [r for r in rows if 0 < r["rate"] < 100]
+    idle = [r for r in rows if r["rate"] <= 0]
+    body = [f'<div class="card"><h1>📋 在手定单</h1>'
+            f'<p class="sub">最近 {days} 天有报工的定单，共 {len(rows)} 个</p>'
+            f'<div class="kv"><span class="k">已完工</span>'
+            f'<span class="v">{len(fin)} 个</span></div>'
+            f'<div class="kv"><span class="k">进行中</span>'
+            f'<span class="v">{len(doing)} 个</span></div>'
+            f'<div class="kv"><span class="k">未开工</span>'
+            f'<span class="v">{len(idle)} 个</span></div>'
+            '<form method="GET" action="/report/orders">'
+            f'<input type="hidden" name="t" value="{esc(token)}">'
+            '<p class="sub" style="margin-top:10px">时间窗</p>'
+            '<select name="days" style="width:100%">'
+            + "".join(f'<option value="{d}"{" selected" if d == days else ""}>'
+                      f'最近 {d} 天</option>'
+                      for d in (3, 7, 15, 30, 90))
+            + '</select><button type="submit" style="margin-top:10px">刷新</button>'
+            '</form></div>']
+
+    if not rows:
+        body.append('<div class="card"><p class="muted">'
+                    f'最近 {days} 天没有报工记录。</p></div>')
+    for r in rows:
+        rate = r["rate"]
+        tag = ('<span class="pill ok">完工</span>' if rate >= 100 else
+               ('<span class="pill no">未开工</span>' if rate <= 0
+                else '<span class="pill">进行中</span>'))
+        body.append(
+            f'<div class="card" style="padding:12px">'
+            f'<div style="display:flex;justify-content:space-between;align-items:center">'
+            f'<a href="/report/progress?zdno={esc(r["zdno"])}&t={esc(token)}" '
+            f'style="font-weight:600;color:#1a73a8;text-decoration:none">'
+            f'{esc(r["zdno"])}</a>{tag}</div>'
+            + _bar(rate)
+            + f'<div style="display:flex;justify-content:space-between;'
+            f'margin-top:6px;font-size:13px;color:#666">'
+            f'<span>{r["fin"]}/{r["nb"]} 扎完工 · 应做 {r["plan"]:,} 件</span>'
+            f'<span>{rate:.0f}%</span></div>'
+            f'<div style="font-size:12px;color:#999;margin-top:2px">'
+            f'最近报工 {esc(r["last_day"])} · {r["recs"]} 笔</div>'
+            f'</div>')
+
+    body.append(f'<div class="card"><a class="btn ghost" href="/report?t={esc(token)}">'
+                f'← 返回报表</a></div>')
+    return _page_shell("在手定单", "".join(body))
 
 
 def page_progress_search(kw, token, results):
@@ -987,6 +1040,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._handle_report_mine()
             if path == "/report/progress":
                 return self._handle_report_progress()
+            if path == "/report/orders":
+                return self._handle_report_orders()
             if path == "/report/wage":
                 return self._handle_report_wage()
             if path == "/admin/pending":
@@ -1384,6 +1439,23 @@ class Handler(BaseHTTPRequestHandler):
                     '<div style="overflow-x:auto;margin-top:10px">'
                     f'<table class="rep"><tr>{cells}</tr>{tr_html}</table></div></div>')
         return self._send(200, _page_shell("我的报工", "".join(body)))
+
+    def _handle_report_orders(self):
+        """在手定单总览（仅主管）。"""
+        me, tok = self._report_user()
+        if not me:
+            return self._redirect_login()
+        if not R.is_supervisor(me["ygno"]):
+            return self._send(403, _page_shell("无权限",
+                '<div class="card"><h1>无权限</h1><p class="sub">'
+                '只有主管可以查看定单总览。</p></div>'))
+        try:
+            days = int(self._q("days", "7"))
+        except ValueError:
+            days = 7
+        days = max(1, min(days, 180))
+        rows = D.report_orders_overview(days, 120)
+        return self._send(200, page_orders_overview(rows, tok, days))
 
     def _handle_report_progress(self):
         """定单进度（仅主管）。
