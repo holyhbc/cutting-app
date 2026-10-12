@@ -36,8 +36,54 @@ def get_conn():
     return conn
 
 
+def _migrate(conn):
+    """补齐历史库缺失的列。
+
+    schema.sql 全是 CREATE TABLE IF NOT EXISTS ——
+    对已经存在的旧表，它**不会**补任何列。
+    阶段3 给 change_request 加了 ygno/old_num/... 等字段，
+    但线上库是阶段1建的旧表，字段缺失，
+    一查就报 "no such column: ygno"（500）。
+
+    这里做幂等迁移：缺哪个补哪个，已存在就跳过。
+    """
+    def cols(table):
+        return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+    have = cols("change_request")
+    if have:                        # 表不存在说明是全新库，交给 schema.sql
+        for ddl in ("ygno TEXT NOT NULL DEFAULT ''",
+                    "ygname TEXT NOT NULL DEFAULT ''",
+                    "old_num INTEGER NOT NULL DEFAULT 0",
+                    "new_num INTEGER NOT NULL DEFAULT 0",
+                    "reason TEXT NOT NULL DEFAULT ''",
+                    "status TEXT NOT NULL DEFAULT 'pending'",
+                    "created_at TEXT NOT NULL DEFAULT ''",
+                    "approve_gh TEXT",
+                    "approve_note TEXT",
+                    "approve_at TEXT",
+                    "synced INTEGER NOT NULL DEFAULT 0"):
+            col = ddl.split()[0]
+            if col in have:
+                continue
+            try:
+                conn.execute(f"ALTER TABLE change_request ADD COLUMN {ddl}")
+                print(f"[migrate] change_request + {col}", flush=True)
+            except Exception as e:
+                print(f"[migrate] change_request.{col} 失败: {e}", flush=True)
+
+    if not cols("sync_meta"):
+        conn.execute("CREATE TABLE IF NOT EXISTS sync_meta "
+                     "(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        print("[migrate] 新建 sync_meta", flush=True)
+
+
 def init_db():
     conn = get_conn()
+    # 必须先迁移再执行 schema.sql：
+    # schema.sql 里有 CREATE INDEX ... ON change_request(status)，
+    # 旧表缺 status 列时，建索引会直接报错，ALTER 根本没机会跑。
+    _migrate(conn)
     with open(SCHEMA, "r", encoding="utf-8") as f:
         conn.executescript(f.read())
     conn.commit()
