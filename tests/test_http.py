@@ -665,3 +665,44 @@ class TestChangeLinkId(HTTPTestCase):
         code, body = self.get("/report/mine", self.tok)
         links = re.findall(r"/change\?report_id=(\d+)", body)
         self.assertNotIn("999999", links)
+
+
+class TestChangeVisibleAtOnce(HTTPTestCase):
+    """回归：改量提交后，列表要立刻反映新数量并标明来源。"""
+
+    def setUp(self):
+        super().setUp()
+        self.add_employee("C001", "测试主管")
+        self.add_employee("C002", "员工测试")
+        self.add_process("ZD1", 2, "四针六线裤", 0.77)
+        self.add_bundle("ZD1", 1, 10, 100)
+        rid = self.db.create_report("S", "ZD1", 1, 10, 2, "四针六线裤",
+                                    "C002", "员工测试", 20, 0.77)["id"]
+        self.db.get_conn().execute(
+            "UPDATE report SET status='synced', jfgzid=555 WHERE id=?", (rid,))
+        self.db.get_conn().commit()
+        self.push_reports([(555, "2026-10-13 10:00:00", "C002", "员工测试",
+                            "ZD1", 2, 1, 10, 20, 0.77, 15.4, 1)])
+        self.rid = rid
+        self.sup = self.login("C001")
+        self.worker = self.login("C002")
+
+    def test_改量后列表立刻显示新数(self):
+        self.db.create_change(self.rid, "C002", "员工测试", 11, "多扫",
+                              approved_by="C001")
+        code, body = self.get("/report/mine", self.worker)
+        self.assertEqual(code, 200)
+        self.assertIn("已改量", body, "要标明这是改过的")
+        self.assertIn("原 20", body)
+        import re
+        row = re.search(r'<tr class="r-sync">(.*?)</tr>', body, re.S).group(1)
+        tds = [re.sub("<[^>]+>", "", t).strip()
+               for t in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)]
+        self.assertIn("11", tds, f"件数应显示新值，实际 {tds}")
+
+    def test_改量中不再给申请入口(self):
+        self.db.create_change(self.rid, "C002", "员工测试", 11, "多扫")
+        code, body = self.get("/report/mine", self.worker)
+        self.assertIn("改量审批中", body)
+        self.assertNotIn(f"/change?report_id={self.rid}", body,
+                         "已在改量流程中就不该再给入口")

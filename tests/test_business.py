@@ -663,3 +663,82 @@ class TestLegacyColumnMigration(ScanTestCase):
             "UPDATE report SET status='synced', jfgzid=7 WHERE id=?", (rid,))
         self.db.get_conn().commit()
         self.assertTrue(self.db.create_change(rid, "C002", "工人", 30, "申请"))
+
+
+class TestChangeOverlay(ScanTestCase):
+    """回归：改量要等同步任务跑完才写进 jfgz，
+    在那之前页面显示的���是旧数 —— 工人/主管会以为「改了没反应」。
+    现在 report_mine 把已批准但未回写的改量提前叠加显示。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.add_employee("C001", "主管")
+        self.add_employee("C002", "工人")
+        self.add_process("ZD1", 2, "四针六线裤", 0.77)
+        self.add_bundle("ZD1", 1, 10, 100)
+        self.rid = self.db.create_report(
+            "S", "ZD1", 1, 10, 2, "四针六线裤", "C002", "工人", 20, 0.77)["id"]
+        self.db.get_conn().execute(
+            "UPDATE report SET status='synced', jfgzid=555 WHERE id=?",
+            (self.rid,))
+        self.db.get_conn().commit()
+        self.push_reports([(555, "2026-10-13 10:00:00", "C002", "工人",
+                            "ZD1", 2, 1, 10, 20, 0.77, 15.4, 1)])
+        self.today = datetime.date.today().isoformat()
+
+    def _mine(self):
+        return self.db.report_mine("2020-01-01", self.today, "C002")
+
+    def test_没有改量时显示原值(self):
+        r = self._mine()[0]
+        self.assertEqual(r["js"], 20)
+        self.assertIsNone(r.get("chg"))
+
+    def test_已批准的改量立刻可见(self):
+        self.db.create_change(self.rid, "C002", "工人", 11, "多扫",
+                              approved_by="C001")
+        r = self._mine()[0]
+        self.assertEqual(r["js"], 11, "改后数量应立刻显示")
+        self.assertEqual(r["js_old"], 20, "原数量要保留用于提示")
+        self.assertEqual(r["chg"], "approved")
+
+    def test_金额随新数量重算(self):
+        self.db.create_change(self.rid, "C002", "工人", 11, "多扫",
+                              approved_by="C001")
+        r = self._mine()[0]
+        self.assertAlmostEqual(r["je"], 11 * 0.77, places=2)
+
+    def test_待审批的改量也显示(self):
+        self.db.create_change(self.rid, "C002", "工人", 15, "报错了")
+        r = self._mine()[0]
+        self.assertEqual(r["js"], 15)
+        self.assertEqual(r["chg"], "pending")
+
+    def test_只取最新一条改量(self):
+        """同一报工可能有多条历史改量，取最后那条。"""
+        self.db.create_change(self.rid, "C002", "工人", 15, "第一次")
+        self.db.get_conn().execute(
+            "UPDATE change_request SET status='rejected'")
+        self.db.get_conn().commit()
+        self.db.create_change(self.rid, "C002", "工人", 11, "第二次",
+                              approved_by="C001")
+        r = self._mine()[0]
+        self.assertEqual(r["js"], 11)
+
+    def test_已驳回的不叠加(self):
+        cid = self.db.create_change(self.rid, "C002", "工人", 11, "试试")
+        self.db.decide_change(cid, False, "C001", "不批")
+        r = self._mine()[0]
+        self.assertEqual(r["js"], 20, "被驳回的改量不该生效")
+        self.assertIsNone(r.get("chg"))
+
+    def test_其他人的改量不影响(self):
+        rid2 = self.db.create_report("S2", "ZD1", 1, 10, 2, "四针六线裤",
+                                     "C003", "丙", 30, 0.77)["id"]
+        self.db.get_conn().execute(
+            "UPDATE report SET status='synced', jfgzid=556 WHERE id=?", (rid2,))
+        self.db.get_conn().commit()
+        self.db.create_change(rid2, "C003", "丙", 5, "改", approved_by="C001")
+        r = self._mine()[0]
+        self.assertEqual(r["js"], 20, "别人的改量不该叠到别人身上")

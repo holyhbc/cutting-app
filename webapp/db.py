@@ -981,7 +981,33 @@ def report_mine(dfrom, dto, ygno, limit=100):
     def _key(r):
         return (str(r["gzdate"]), r["zdno"])
     merged = sorted(hist + local, key=_key, reverse=True)
-    return merged[:int(limit)]
+    merged = merged[:int(limit)]
+
+    # ---- 叠加「已批准但还没回写」的改量 ----
+    # 改量要等同步任务跑完才写进 jfgz，在那之前页面显示的还是旧数，
+    # 工人/主管会以为「改了没反应」。这里把改后的数量提前显示出来，
+    # 并标出「改量中 / 已改量」，等同步跑完自然就一致了。
+    rids = [r["id"] for r in merged if r.get("id")]
+    if rids:
+        q = ",".join("?" * len(rids))
+        chg = {c["report_id"]: c for c in get_conn().execute(
+            f"SELECT report_id, old_num, new_num, status FROM change_request"
+            f" WHERE report_id IN ({q})"
+            f"   AND status IN ('pending','approved') ORDER BY id DESC", rids)}
+        for r in merged:
+            c = chg.get(r.get("id"))
+            if not c:
+                continue
+            r["js_old"] = r["js"]
+            r["js"] = int(c["new_num"])
+            # 金额按新数量重算（用单价反推，误差可接受）
+            try:
+                rate = float(r["je"]) / float(r["js_old"]) if r["js_old"] else 0
+                r["je"] = round(r["js"] * rate, 4)
+            except Exception:
+                pass
+            r["chg"] = c["status"]
+    return merged
 
 
 def report_mine_summary(dfrom, dto, ygno):

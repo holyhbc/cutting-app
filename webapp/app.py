@@ -1691,10 +1691,22 @@ class Handler(BaseHTTPRequestHandler):
             elif src == "discarded":
                 status = ('<span style="font-size:11px;color:#999">'
                           '已作废</span>')
+            elif r.get("chg"):
+                # 改量已生效但还没写回数据库，先把改后的数显示出来
+                if r["chg"] == "pending":
+                    status = ('<span style="font-size:11px;color:#b26a00">'
+                              f'改量审批中（原 {r.get("js_old")}）</span>')
+                else:
+                    status = ('<span style="font-size:11px;color:#1a73a8">'
+                              f'已改量（原 {r.get("js_old")}）'
+                              f'，等同步</span>')
             else:
                 status = ""
             act = ""
-            if r.get("id"):
+            if r.get("chg"):
+                # 已在改量流程中，别再给入口（重复申请会被后端拒）
+                act = '<span style="font-size:11px;color:#999">改量中</span>'
+            elif r.get("id"):
                 lbl = "主管改量" if is_sup_here else "申请改量"
                 act = (f'<a href="/change?report_id={r["id"]}&t={esc(tok)}" '
                        f'style="font-size:12px;color:#1a73a8">{lbl}</a>')
