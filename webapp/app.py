@@ -179,13 +179,15 @@ def page_scan(smap, view, err="", done="", me=None, prefer_gx=None, token="", la
     rows = []
     for p in procs:
         cls = "proc" + (" done" if p["done"] else "")
+        # 把「已报/应做」摆出来，工人一眼知道这扎做到哪了
         pill = ('<span class="pill ok">已做完</span>' if p["done"] else
                 f'<span class="pill no">剩 {p["remain"]}</span>')
         rows.append(
             f'<div class="{cls}" data-gx="{p["gx"]}" data-remain="{p["remain"]}" '
             f'data-name="{esc(p["gxname"])}">'
             f'<div><div class="pn">{p["gx"]}. {esc(p["gxname"])}</div>'
-            f'<div class="ps">单价 {p["dj"]:.4f} 元/件</div></div>{pill}</div>')
+            f'<div class="ps">单价 {p["dj"]:.4f} 元/件　·　'
+            f'本扎应做 {view["plan_qty"]} 件</div></div>{pill}</div>')
 
     # 记忆命中且那道还有余量 -> 自动选中
     auto_gx = None
@@ -285,7 +287,7 @@ def page_scan(smap, view, err="", done="", me=None, prefer_gx=None, token="", la
   <input name="js" id="js" type="number" inputmode="numeric" min="1" step="1"
          placeholder="点上方工序会自动填入" required>
   <div class="tip" id="tip">还没选工序</div>
-  <button type="submit" id="btn">提交报工</button>
+  <button type="submit" id="btn"{"" if auto_gx else " disabled"}>提交报工</button>
   <button type="button" class="ghost" onclick="openScan()">📷 扫下一扎</button>
 </div>
 </form>
@@ -396,7 +398,57 @@ document.querySelectorAll('#plist .proc').forEach(function(el){{
     var t=document.getElementById('tip');
     t.textContent='已选「'+nm+'」，剩余 '+remain+' 件';
     t.className='tip ok';
+    // 数量上限跟着剩余量走：超出就直接标红并禁掉提交，
+    // 免得填了提交才被服务器拒，白跑一趟还留下一条失败记录
+    js.max=remain;
+    chk();
   }};
+}});
+
+// 提交前校验：这扎剩余多少就只能报多少。
+// 不校验的话工人可以手动改大数量，提交后被服务器拒，
+// 结果是留下一条 failed 记录，还要主管作废，非常别扭。
+function chk(){{
+  var el=document.querySelector('#plist .proc.sel');
+  var js=document.getElementById('js');
+  var t=document.getElementById('tip');
+  var btn=document.getElementById('btn');
+  if(!el){{
+    btn.disabled=true;
+    if(t.className.indexOf('warn')<0 && t.className.indexOf('ok')<0)
+      t.textContent='还没选工序';
+    return;
+  }}
+  var remain=parseInt(el.dataset.remain)||0;
+  var v=parseInt(js.value)||0;
+  if(v>remain){{
+    btn.disabled=true;
+    js.style.borderColor='#c0392b';
+    t.textContent='超过剩余数了：这扎「'+el.dataset.name+'」只剩 '+remain+' 件，已报的下次用「改量审批」改';
+    t.className='tip warn';
+  }} else if(v>0){{
+    btn.disabled=false;
+    js.style.borderColor='';
+    t.textContent='已选「'+el.dataset.name+'」，剩余 '+remain+' 件，本次可报 1~'+remain+' 件';
+    t.className='tip ok';
+  }} else {{
+    btn.disabled=true;
+    js.style.borderColor='';
+  }}
+}}
+document.getElementById('js').addEventListener('input', chk);
+
+document.getElementById('f').addEventListener('submit', function(e){{
+  var el=document.querySelector('#plist .proc.sel');
+  if(!el){{ e.preventDefault(); alert('请先点一下上面的工序'); return; }}
+  var remain=parseInt(el.dataset.remain)||0;
+  var v=parseInt(document.getElementById('js').value)||0;
+  if(v>remain){{
+    e.preventDefault();
+    alert('报超了：这扎「'+el.dataset.name+'」只剩 '+remain+' 件，你填了 '+v+' 件');
+    return;
+  }}
+  if(v<=0){{ e.preventDefault(); alert('请填写报工数量'); return; }}
 }});
 
 document.addEventListener('DOMContentLoaded', autoPick);

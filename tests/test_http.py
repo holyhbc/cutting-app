@@ -345,3 +345,59 @@ class TestDiscardApi(HTTPTestCase):
         self.assertEqual(code, 200)
         self.assertIn("作废", body)
         self.assertIn("/api/report/discard", body)
+
+
+class TestOverLimitGuard(HTTPTestCase):
+    """回归：报满的工序要能在前端挡住，不能提交了才被服务器拒。
+
+    原来前端只自动填剩余数，不校验上限，
+    工人手动改大数量 → 提交被拒 → 留下一条 failed 记录，
+    还得找主管作废，非常别扭。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.add_employee("C002", "员工测试")
+        self.add_process("ZD1", 1, "四针六线衣", 0.7)
+        self.add_process("ZD1", 2, "四针六线裤", 0.77)
+        self.add_bundle("ZD1", 1, 11, 40)
+        self.db.upsert_scan_map("SID", "ZD1", 1, 11)
+        self.tok = self.login("C002")
+
+    def _page(self):
+        code, body = self.get("/s/SID", self.tok)
+        self.assertEqual(code, 200)
+        return body
+
+    def test_显示已报和剩余(self):
+        body = self._page()
+        self.assertIn("剩 ", body)
+        self.assertIn("本扎应做 40 件", body, "工人要知道这扎应做多少")
+
+    def test_有提交前上限校验(self):
+        body = self._page()
+        self.assertIn("超过剩余数了", body)
+        self.assertIn("js.max=remain", body, "输入框上限要跟着剩余量走")
+        self.assertIn("addEventListener('submit'", body)
+
+    def test_未选工序时提交按钮禁用(self):
+        self.assertIn('id="btn" disabled', self._page())
+
+    def test_已做完的工序有标记且点不动(self):
+        # 先把工序1 报满
+        self.db.create_report("X", "ZD1", 1, 11, 1, "四针六线衣",
+                              "C002", "员工测试", 40, 0.7)
+        self.db.get_conn().execute("UPDATE report SET status='synced', jfgzid=1")
+        self.db.get_conn().commit()
+        self.db.apply_report_snapshot(
+            [(1, "2026-10-10 10:00:00", "C002", "员工测试", "ZD1", 1, 1, 11, 40,
+              0.7, 28.0, 1)], 1, 1)
+        body = self._page()
+        self.assertIn("已做完", body)
+        self.assertIn("这道工序已做完", body, "点了要有明确反馈")
+
+    def test_后端仍然兜得住(self):
+        """前端只是提示，后端校验不能被绕过。"""
+        with self.assertRaises(self.rules.RuleError) as ctx:
+            self.rules.check_and_build_report("SID", "ZD1", 1, 11, 1, "C002", 999)
+        self.assertEqual(ctx.exception.code, "over_limit")
