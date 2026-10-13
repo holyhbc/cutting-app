@@ -274,6 +274,21 @@ def list_failed(limit=100):
     return [dict(r) for r in rows]
 
 
+def list_reports(status="synced", limit=200, ygno=None):
+    """按状态列报工。主管看全部，工人只能看自己。"""
+    sql = "SELECT * FROM report WHERE 1=1"
+    args = []
+    if status and status != "all":
+        sql += " AND status=?"
+        args.append(status)
+    if ygno:
+        sql += " AND ygno=?"
+        args.append(ygno)
+    sql += " ORDER BY id DESC LIMIT ?"
+    args.append(int(limit))
+    return [dict(r) for r in get_conn().execute(sql, args).fetchall()]
+
+
 def mark_report(id_, status, jfgzid=None, err=None):
     conn = get_conn()
     if status == "synced":

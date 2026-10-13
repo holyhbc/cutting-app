@@ -574,14 +574,24 @@ def page_admin(st, token):
                   f'<div style="font-size:13px;color:#666">{desc}</div></a>')
     body.append(f'<div class="card"><h2>待处理</h2>{items}</div>')
 
+    # 已同步也要能看到 —— 以前只有计数没有列表，
+    # 报工同步成功后主管在列表里一条都看不到，像是「没记录」。
     ok = ""
-    for key, title, desc in (
-        ("synced", "已同步报工", f'{st["synced"]} 条已写回 SQL Server'),
-        ("workers", "在职账号", f'{st["workers"]} 个工人可登录'),
-        ("sessions", "登录令牌", f'{st["sessions"]} 个有效令牌'),
+    for key, title, link, desc in (
+        ("synced", "已同步报工", "/admin/synced",
+         f'{st["synced"]} 条已写回 SQL Server'),
+        ("workers", "在职账号", None, f'{st["workers"]} 个工人可登录'),
+        ("sessions", "登录令牌", None, f'{st["sessions"]} 个有效令牌'),
     ):
-        ok += (f'<div class="kv"><span class="k">{title}</span>'
-               f'<span class="v">{desc}</span></div>')
+        if link:
+            ok += (f'<a class="kv" href="{link}?t={esc(token)}" '
+                   f'style="display:flex;justify-content:space-between;'
+                   f'text-decoration:none;color:inherit">'
+                   f'<span class="k">{title}</span>'
+                   f'<span class="v">{desc} ›</span></a>')
+        else:
+            ok += (f'<div class="kv"><span class="k">{title}</span>'
+                   f'<span class="v">{desc}</span></div>')
     body.append(f'<div class="card"><h2>概况</h2>{ok}'
                 + (f'<div class="kv"><span class="k">最早未同步</span>'
                    f'<span class="v">{esc(st["oldest"])}</span></div>'
@@ -596,9 +606,15 @@ def page_admin(st, token):
 
 
 def page_admin_reports(rows, token, kind):
-    """待同步 / 同步失败 报工列表。"""
-    is_fail = (kind == "failed")
-    title = "同步失败" if is_fail else "待同步报工"
+    """报工列表：待同步 / 同步失败 / 已同步。"""
+    title = {"failed": "同步失败", "synced": "已同步报工"}.get(kind, "待同步报工")
+    extra = ""
+    if kind == "synced" and rows:
+        jids = [str(r["jfgzid"]) for r in rows if r.get("jfgzid")]
+        if jids:
+            extra = (f'<p class="sub">对应 SQL Server 的 jfgz.id：'
+                     f'{esc("、".join(jids[:12]))}'
+                     f'{"…" if len(jids) > 12 else ""}</p>')
     cells = ""
     if rows:
         cells = "".join(f"<th>{esc(h)}</th>" for h in
@@ -613,22 +629,29 @@ def page_admin_reports(rows, token, kind):
                     f'<td>{r["js"]}</td>'
                     f'<td>{esc(str(r["gzdate"])[:16])}</td>'
                     f'<td style="white-space:normal;max-width:160px;font-size:12px;'
-                    f'color:#c0392b">{esc(err[:60])}</td></tr>')
+                    f'color:{"#c0392b" if err else "#888"}">'
+                    f'{esc(err[:60] if err else ("jfgzid=" + str(r["jfgzid"]) if r.get("jfgzid") else ""))}</td></tr>')
         table = (f'<div style="overflow-x:auto"><table class="rep">'
                  f'<tr>{cells}</tr>{trs}</table></div>')
     else:
-        table = '<p class="muted">没有记录，都处理完了。</p>'
+        table = '<p class="muted">没有记录。</p>'
+    tabs = "".join(
+        f'<a class="btn {"ghost" if k == kind else ""}" href="/admin/{k}?t={esc(token)}">{lb}</a>'
+        for k, lb in (("pending", "待同步"), ("failed", "同步失败"), ("synced", "已同步")))
     body = [f'<div class="card"><h1>{title}</h1>'
-            f'<p class="sub">共 {len(rows)} 条</p>'
+            f'<p class="sub">共 {len(rows)} 条</p>{extra}'
             f'<a class="btn ghost" href="/admin?t={esc(token)}">← 返回后台</a></div>',
-            f'<div class="card">{table}</div>',
-            f'<div class="card"><p class="muted">'
-            + ('<b>怎么办</b>：这些报工被服务器拒绝了（超量、工序不存在等），'
-               '需要班组长在电脑上处理，或让工人走「改量审批」重新报。'
-               if is_fail else
-               '<b>怎么办</b>：等局域网电脑跑一次同步器即可自动写回数据库，'
-               '不用手工处理。')
-            + '</p></div>']
+            f'<div class="card"><h2>切换</h2>{tabs}</div>',
+            f'<div class="card">{table}</div>']
+    if kind == "failed":
+        body.append(f'<div class="card"><p class="muted">'
+                    '<b>怎么办</b>：这些报工被服务器拒绝了（超量、工序不存在等），'
+                    '需要班组长在电脑上处理，或让工人走「改量审批」重新报。'
+                    '</p></div>')
+    elif kind == "pending":
+        body.append(f'<div class="card"><p class="muted">'
+                    '<b>怎么办</b>：等局域网电脑跑一次同步器即可自动写回数据库，'
+                    '不用手工处理。</p></div>')
     return _page_shell(title, "".join(body))
 
 
@@ -1167,6 +1190,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._handle_admin_pending()
             if path == "/admin/failed":
                 return self._handle_admin_pending()
+            if path == "/admin/synced":
+                return self._handle_admin_pending()
             if path.startswith("/api/bundle/"):
                 sid = path.rsplit("/", 1)[-1]
                 smap = D.get_scan_map(sid)
@@ -1590,9 +1615,11 @@ class Handler(BaseHTTPRequestHandler):
         if auth is None:
             return
         _, tok = auth
-        kind = "failed" if self._q("kind") == "failed" else \
-            ("failed" if "/admin/failed" in self.path else "pending")
-        rows = (D.list_failed(300) if kind == "failed" else D.list_pending(300))
+        kind = self._q("kind") or ""
+        if not kind:
+            kind = ("failed" if "/admin/failed" in self.path else
+                    "synced" if "/admin/synced" in self.path else "pending")
+        rows = D.list_reports(kind, 300)
         return self._send(200, page_admin_reports(rows, tok, kind))
 
     def _handle_report_orders(self):
