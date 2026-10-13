@@ -21,6 +21,7 @@ python tests/run_all.py -k 权限   # 只跑名字含「权限」的
 | `test_business.py` | 报工/改量规则、进度算法、数据库迁移 |
 | `test_http.py` | 路由鉴权、重定向、推送令牌校验 |
 | `test_sync.py` | 改量回写的 SQL 正确性、幂等、金额重算 |
+| `test_desktop.py` | 桌面版 SQL Server 2000 语法限制、列契约、导出兜底 |
 
 ## 每个用例都对应一个真实踩过的坑
 

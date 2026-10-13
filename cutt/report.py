@@ -85,15 +85,34 @@ def export_rows_to_excel(path, sheet_name, headers, rows, sum_headers=None, sum_
 
     def _write_csv(sheets, fallback_note):
         base = os.path.splitext(path)[0] + ".csv"
-        with open(base, "w", newline="", encoding="utf-8-sig") as fh:
-            w = csv.writer(fh)
-            for i, (hs, rs) in enumerate(sheets):
-                if i:
-                    w.writerow([])
-                w.writerow(hs)
-                for r in rs:
-                    w.writerow([_fmt(c) for c in r])
-        return True, f"未使用 openpyxl，已改为导出 CSV：{os.path.basename(base)}（{fallback_note}）"
+        # 目录不存在时 openpyxl 会失败、退回 CSV，但 CSV 也写在同一个
+        # 目录下 —— 目录不存在它同样会失败，把「保证一定导出得出来」
+        # 的承诺变成空话。这里补建目录，都不行就退到系统临时目录。
+        try:
+            d = os.path.dirname(base)
+            if d and not os.path.isdir(d):
+                os.makedirs(d, exist_ok=True)
+            with open(base, "w", newline="", encoding="utf-8-sig") as fh:
+                w = csv.writer(fh)
+                for i, (hs, rs) in enumerate(sheets):
+                    if i:
+                        w.writerow([])
+                    w.writerow(hs)
+                    for r in rs:
+                        w.writerow([_fmt(c) for c in r])
+            return True, (f"未使用 openpyxl，已改为导出 CSV："
+                          f"{os.path.basename(base)}（{fallback_note}）")
+        except Exception as e:
+            import tempfile
+            fd, fb = tempfile.mkstemp(suffix=".csv", prefix="报表_")
+            os.close(fd)
+            with open(fb, "w", newline="", encoding="utf-8-sig") as fh:
+                w = csv.writer(fh)
+                for hs, rs in sheets:
+                    w.writerow(hs)
+                    for r in rs:
+                        w.writerow([_fmt(c) for c in r])
+            return True, (f"原路径不可写（{e}），已导出到临时目录：{fb}")
 
     try:
         import openpyxl
