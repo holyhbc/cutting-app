@@ -401,3 +401,101 @@ class TestOverLimitGuard(HTTPTestCase):
         with self.assertRaises(self.rules.RuleError) as ctx:
             self.rules.check_and_build_report("SID", "ZD1", 1, 11, 1, "C002", 999)
         self.assertEqual(ctx.exception.code, "over_limit")
+
+
+class TestChangeEntryPoints(HTTPTestCase):
+    """工人申请改量 / 主管代改 的两个入口。"""
+
+    def setUp(self):
+        super().setUp()
+        self.add_employee("C001", "测试主管")
+        self.add_employee("C002", "员工测试")
+        self.add_employee("C003", "工人丙")
+        self.add_process("ZD1", 1, "打洞纽扣", 0.5)
+        self.add_bundle("ZD1", 1, 11, 100)
+        rid = self.db.create_report("S", "ZD1", 1, 11, 1, "打洞纽扣",
+                                    "C002", "员工测试", 100, 0.5)["id"]
+        self.db.get_conn().execute(
+            "UPDATE report SET status='synced', jfgzid=9001 WHERE id=?", (rid,))
+        self.db.get_conn().execute(
+            "INSERT OR REPLACE INTO report_baseline VALUES (?,1,11,1,?,?)",
+            ("ZD1", 100, self.db.now_str()))
+        self.db.get_conn().commit()
+        # 已同步的报工在「我的报工」里走 jfgz_report 历史那条路径，
+        # 光在 report 表里标 synced 是看不到的
+        self.push_reports([(9001, "2026-10-12 10:00:00", "C002", "员工测试",
+                            "ZD1", 1, 1, 11, 100, 0.5, 50.0, 1)])
+        self.rid = rid
+        self.sup = self.login("C001")
+        self.worker = self.login("C002")
+
+    def _post_change(self, token, rid, new_js, reason):
+        import urllib.parse as up
+        body = up.urlencode({"report_id": rid, "new_js": new_js,
+                             "reason": reason, "token": token}).encode()
+        req = urllib.request.Request(self.base + "/change", data=body,
+                                     method="POST",
+                                     headers={"Content-Type":
+                                              "application/x-www-form-urlencoded"})
+        try:
+            r = urllib.request.urlopen(req, timeout=20)
+            return r.getcode(), r.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode("utf-8", "replace")
+
+    def test_工人申请后进待审批(self):
+        code, body = self._post_change(self.worker, self.rid, 80, "点数有误")
+        self.assertEqual(code, 200)
+        self.assertIn("待主管审批", body)
+        self.assertEqual(self.db.count_pending_changes(), 1)
+
+    def test_我的报工页有申请改量入口(self):  # noqa: D401
+        """回归：改量入口以前只在报工成功那一瞬的弹窗里，
+        工人离开页面后就再也找不到了。"""
+        code, body = self.get("/report/mine", self.worker)
+        self.assertEqual(code, 200)
+        self.assertIn("/change?report_id=", body)
+        self.assertIn("申请改量", body)
+
+    def test_主管页面显示主管改量(self):
+        code, body = self.get("/report/mine?ygno=C002", self.sup)
+        self.assertIn("主管代改", body)
+        self.assertIn("主管改量", body)
+
+    def test_主管能看别人的报工(self):
+        code, body = self.get("/report/mine?ygno=C002", self.sup)
+        self.assertEqual(code, 200)
+        self.assertIn("C002", body)
+        self.assertIn("看谁的报工", body, "主管要有选择器")
+
+    def test_工人不能看别人的报工(self):
+        """工人传 ygno 也只能看自己 —— 防止越权查别人工资。"""
+        code, body = self.get("/report/mine?ygno=C003", self.worker)
+        self.assertEqual(code, 200)
+        self.assertNotIn("工人丙", body)
+
+    def test_主管代改直接生效不进待审批(self):
+        code, body = self._post_change(self.sup, self.rid, 80, "主管核实后调整")
+        self.assertEqual(code, 200, body[:400])
+        self.assertIn("已通过", body)
+        self.assertEqual(self.db.count_pending_changes(), 0,
+                         "代改不该再等审批")
+
+    def test_代改落到approved并记录审批人(self):
+        self._post_change(self.sup, self.rid, 80, "主管核实后调整")
+        rows = self.db.list_changes(status=None, ygno="C002")
+        self.assertEqual(rows[0]["status"], "approved")
+        self.assertEqual(rows[0]["approve_gh"], "C001")
+
+    def test_其他工人不能代改(self):
+        other = self.login("C003")
+        code, body = self._post_change(other, self.rid, 80, "我要改")
+        self.assertEqual(code, 403)
+        self.assertIn("无权限", body)
+
+    def test_代改页面文案区分(self):
+        code, body = self.get(f"/change?report_id={self.rid}", self.sup)
+        self.assertIn("主管代改报工", body)
+        self.assertIn("直接生效", body)
+        code2, body2 = self.get(f"/change?report_id={self.rid}", self.worker)
+        self.assertIn("申请修改报工数量", body2)

@@ -83,17 +83,37 @@ class TestChangeRules(ScanTestCase):
         self.add_bundle("ZD1", 1, 1, 100)
         self.rid = self.db.create_report(
             "SID", "ZD1", 1, 1, 1, "打洞纽扣", "C002", "员工测试", 100, 0.5)["id"]
+        # 改量要求报工已同步进 jfgz（有 jfgzid），否则改不动
+        self.db.get_conn().execute(
+            "UPDATE report SET status='synced', jfgzid=9001 WHERE id=?", (self.rid,))
+        self.db.get_conn().commit()
 
     def test_正常改量(self):
         _, new_js = self.rules.check_change_request(self.rid, 92, "重复裁了8件", "C002")
         self.assertEqual(new_js, 92)
 
     def test_改量超量被拒(self):
-        """改后合计不能超过应做数。"""
-        self.db.create_report("SID2", "ZD1", 1, 1, 1, "打洞纽扣",
-                              "C002", "员工测试", 20, 0.5)
+        """改后合计不能超过应做数。
+
+        报工同步后数量会落到 report_baseline（SQL Server 的历史基线），
+        上限校验读的是 基线 + 未同步的本地报工，所以基线要先写好。
+        """
+        self.db.get_conn().execute(
+            "INSERT OR REPLACE INTO report_baseline "
+            "(zdno,cc,zh,gx,reported_qty,updated_at) VALUES (?,1,1,1,?,?)",
+            ("ZD1", 30, self.db.now_str()))
+        self.db.get_conn().commit()
+        # 合计 = 基线30 - 原值100 + 新值 99 = 29 ... 仍不超；
+        # 要触发超量必须让 基线 - 原值 + 新值 > 应做，
+        # 所以把原报数量调小、基线调大，让改后合计明确超过 100
+        self.db.get_conn().execute(
+            "UPDATE report SET js=40 WHERE id=?", (self.rid,))
+        self.db.get_conn().execute(
+            "INSERT OR REPLACE INTO report_baseline VALUES (?,1,1,1,?,?)",
+            ("ZD1", 80, self.db.now_str()))
+        self.db.get_conn().commit()
         with self.assertRaises(self.rules.RuleError) as ctx:
-            self.rules.check_change_request(self.rid, 95, "想改大", "C002")
+            self.rules.check_change_request(self.rid, 90, "想改大", "C002")
         self.assertEqual(ctx.exception.code, "over_limit")
 
     def test_改量数量必须正(self):
@@ -344,3 +364,83 @@ class TestDiscard(ScanTestCase):
     def test_作废状态不计入待同步(self):
         rows = self.db.list_reports("pending", 50)
         self.assertEqual(len(rows), 0, "作废的不能再被同步器捡走")
+
+
+class TestSupervisorEdit(ScanTestCase):
+    """主管代改 —— 走同一条 jfzg_change 留痕链路，不开后门。"""
+
+    def setUp(self):
+        super().setUp()
+        self.add_employee("C001", "测试主管")
+        self.add_employee("C002", "工人乙")
+        self.add_process("ZD1", 1, "打洞纽扣", 0.5)
+        self.add_bundle("ZD1", 1, 11, 100)
+        self.rid = self.db.create_report(
+            "S", "ZD1", 1, 11, 1, "打洞纽扣", "C002", "工人乙", 100, 0.5)["id"]
+        # 必须已同步才有 jfgzid，否则改量无处落地
+        self.db.get_conn().execute(
+            "UPDATE report SET status='synced', jfgzid=999 WHERE id=?", (self.rid,))
+        self.db.get_conn().commit()
+
+    def test_主管能改工人的报工(self):
+        rep, new_js = self.rules.check_change_request(
+            self.rid, 80, "点数有误", "C001", supervisor=True)
+        self.assertEqual(new_js, 80)
+        self.assertEqual(rep["ygno"], "C002")   # 归属仍是工人，不是主管
+
+    def test_代改落成已通过(self):
+        cid = self.db.create_change(self.rid, "C002", "工人乙", 80,
+                                    "点数有误", approved_by="C001")
+        r = next(x for x in self.db.list_changes(status=None, ygno="C002")
+                 if x["id"] == cid)
+        self.assertEqual(r["status"], "approved")
+        self.assertEqual(r["approve_gh"], "C001")
+
+    def test_代改同样要理由(self):
+        with self.assertRaises(self.rules.RuleError) as ctx:
+            self.rules.check_change_request(self.rid, 80, "  ", "C001",
+                                            supervisor=True)
+        self.assertEqual(ctx.exception.code, "no_reason")
+
+    def test_其他工人仍然不能改(self):
+        self.add_employee("C003", "工人丙")
+        with self.assertRaises(self.rules.RuleError) as ctx:
+            self.rules.check_change_request(self.rid, 80, "理由", "C003",
+                                            supervisor=False)
+        self.assertEqual(ctx.exception.code, "not_owner")
+
+    def test_报工本人仍可申请(self):
+        """C002 本人申请改自己的，权限不该被主管功能挤掉。"""
+        rep, new_js = self.rules.check_change_request(
+            self.rid, 80, "点数有误", "C002", supervisor=False)
+        self.assertEqual(new_js, 80)
+
+    def test_代改也要守上限(self):
+        """主管也不能把量改到超过应做数。"""
+        self.db.get_conn().execute(
+            "INSERT OR REPLACE INTO report_baseline "
+            "(zdno,cc,zh,gx,reported_qty,updated_at) VALUES (?,1,11,1,?,?)",
+            ("ZD1", 60, self.db.now_str()))
+        self.db.get_conn().commit()
+        # 60 - 100 + 99 = 59，仍不超；把原值调到 40 才能构造出超量
+        self.db.get_conn().execute(
+            "UPDATE report SET js=40 WHERE id=?", (self.rid,))
+        self.db.get_conn().commit()
+        with self.assertRaises(self.rules.RuleError) as ctx:
+            self.rules.check_change_request(self.rid, 95, "想改大", "C001",
+                                            supervisor=True)
+        self.assertEqual(ctx.exception.code, "over_limit")
+
+    def test_未同步的改不了(self):
+        """同步失败的报工没有 jfgzid，只能作废后重报。"""
+        rid2 = self.db.create_report("S3", "ZD1", 1, 11, 1, "打洞纽扣",
+                                     "C002", "工人乙", 150, 0.5)["id"]
+        self.db.get_conn().execute(
+            "UPDATE report SET status='failed', last_err='超量' WHERE id=?",
+            (rid2,))
+        self.db.get_conn().commit()
+        with self.assertRaises(self.rules.RuleError) as ctx:
+            self.rules.check_change_request(rid2, 10, "改小", "C001",
+                                            supervisor=True)
+        self.assertEqual(ctx.exception.code, "not_synced")
+        self.assertIn("作废", ctx.exception.message)

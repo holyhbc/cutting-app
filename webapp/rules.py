@@ -281,19 +281,31 @@ def is_supervisor(ygno):
     return str(ygno or "") in sup
 
 
-def check_change_request(report_id, new_js, reason, ygno):
+def check_change_request(report_id, new_js, reason, ygno, supervisor=False):
     """校验改量申请。返回 (report, 新值)。不通过抛 RuleError。
 
     ygno 显式传入，不用模块级全局变量 ——
     全局变量在多线程下会互相串，导致 A 的请求用 B 的身份校验。
+
+    supervisor=True 时允许改别人的报工（主管代改），
+    其余校验一律照旧 —— 走的是同一条 jfzg_change 留痕链路，
+    不是开后门直改 jfgz（铁律 D-005）。
     """
     rep = D.get_report(report_id)
     if not rep:
         raise RuleError("报工记录不存在", "no_report")
-    if rep["ygno"] != str(ygno or ""):
+    if not supervisor and rep["ygno"] != str(ygno or ""):
         raise RuleError("只能修改自己的报工", "not_owner")
     if D.has_pending_change(report_id):
         raise RuleError("这条报工已有一条待审批的改量申请", "dup_pending")
+    # 还没同步进 jfgz 的报工改不了：没有 jfgzid，改量无处落地。
+    # 这类（同步失败的）只能作废后重报。
+    if not rep.get("jfgzid"):
+        if rep.get("status") == "failed":
+            raise RuleError(
+                "这条报工没有报上去（多半是超量），改不了。"
+                "请让主管在后台作废它，然后重新报正确的数量。", "not_synced")
+        raise RuleError("这条报工还没同步，等同步完再改", "not_synced")
 
     try:
         new_js = int(new_js)

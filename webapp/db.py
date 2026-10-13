@@ -450,8 +450,14 @@ def has_pending_change(report_id):
     return int(r[0]) > 0
 
 
-def create_change(report_id, ygno, ygname, new_js, reason):
-    """工人申请改量。返回 (id, 说明)。"""
+def create_change(report_id, ygno, ygname, new_js, reason,
+                  approved_by="", note=""):
+    """工人申请改量。返回 (id, 说明)。
+
+    approved_by 非空 = 主管代改，直接落成 approved 状态。
+    仍然写 change_request、走同一条 jfzg_change 留痕链路，
+    不是开后门直改 jfgz（铁律 D-005）。
+    """
     # 表单传来的都是字符串，SQLite 不接受 str 绑到 INTEGER 列。
     # 必须在入口统一转成 int，否则报
     # "Error binding parameter 0 - probably unsupported type"。
@@ -467,12 +473,23 @@ def create_change(report_id, ygno, ygname, new_js, reason):
         conn = get_conn()
         if has_pending_change(report_id):
             raise ValueError("这条报工已有一条待审批的改量申请，请等主管处理完")
-        conn.execute(
-            "INSERT INTO change_request (report_id, jfgzid, ygno, ygname, gx, gxname, "
-            "zdno, cc, zh, old_num, new_num, reason, status, created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'pending',?)",
-            (report_id, rep["jfgzid"], ygno, ygname, rep["gx"], rep["gxname"],
-             rep["zdno"], rep["cc"], rep["zh"], rep["js"], int(new_js), reason, ts))
+        if approved_by:
+            conn.execute(
+                "INSERT INTO change_request (report_id, jfgzid, ygno, ygname, gx, "
+                "gxname, zdno, cc, zh, old_num, new_num, reason, status, "
+                "created_at, approve_gh, approve_at, approve_note) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'approved',?,?,?,?)",
+                (report_id, rep["jfgzid"], ygno, ygname, rep["gx"], rep["gxname"],
+                 rep["zdno"], rep["cc"], rep["zh"], rep["js"], int(new_js),
+                 reason, ts, approved_by, ts, (note or "")[:200]))
+        else:
+            conn.execute(
+                "INSERT INTO change_request (report_id, jfgzid, ygno, ygname, gx, "
+                "gxname, zdno, cc, zh, old_num, new_num, reason, status, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'pending',?)",
+                (report_id, rep["jfgzid"], ygno, ygname, rep["gx"], rep["gxname"],
+                 rep["zdno"], rep["cc"], rep["zh"], rep["js"], int(new_js),
+                 reason, ts))
         conn.commit()
         new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     log_audit("change_apply",
@@ -784,7 +801,7 @@ def report_mine(dfrom, dto, ygno, limit=100):
     # jfdj 里压根没有对应工序，显示"—"是如实反映。
     # 颜色从 bundle 表关联（同一定单一扎只有一个颜色，bundle 主键含 yn）。
     hist = [dict(r) for r in get_conn().execute(
-        "SELECT r.gzdate, r.ygno, r.zdno, r.gx, r.cc, r.zh, r.js, r.je, "
+        "SELECT r.jfgzid id, r.gzdate, r.ygno, r.zdno, r.gx, r.cc, r.zh, r.js, r.je, "
         "       COALESCE(p.gxname,'') gxname, "
         "       COALESCE(b.yn,'') yn, 'synced' src "
         "FROM jfgz_report r "
@@ -795,7 +812,7 @@ def report_mine(dfrom, dto, ygno, limit=100):
         "ORDER BY r.gzdate DESC, r.jfgzid DESC LIMIT ?",
         (ygno, dfrom, dto, int(limit))).fetchall()]
     local = [dict(r) for r in get_conn().execute(
-        "SELECT r.gzdate, r.ygno, r.zdno, r.gx, r.cc, r.zh, r.js, r.je, "
+        "SELECT r.id, r.gzdate, r.ygno, r.zdno, r.gx, r.cc, r.zh, r.js, r.je, "
         "       COALESCE(NULLIF(r.gxname,''),(SELECT p.gxname FROM process p "
         "                    WHERE p.zdno=r.zdno AND p.gx=r.gx)) gxname, "
         "       COALESCE((SELECT MIN(yn) FROM bundle b "
@@ -822,3 +839,10 @@ def report_mine_summary(dfrom, dto, ygno):
         "pending": sum(1 for r in rows if r.get("src") == "pending"),
         "failed": sum(1 for r in rows if r.get("src") == "failed"),
     }
+
+
+def list_report_workers(limit=60):
+    """有报工记录的工号列表，供主管选择代改谁的报工。"""
+    return [r[0] for r in get_conn().execute(
+        "SELECT DISTINCT ygno FROM report WHERE ygno IS NOT NULL AND ygno<>'' "
+        "ORDER BY ygno LIMIT ?", (int(limit),)).fetchall()]

@@ -155,6 +155,9 @@ class TestChangeOwnership(ScanTestCase):
         self.add_bundle("ZD1", 1, 1, 100)
         rid = self.db.create_report("S1", "ZD1", 1, 1, 1, "打洞纽扣",
                                     "C002", "员工乙", 100, 0.5)["id"]
+        self.db.get_conn().execute(
+            "UPDATE report SET status='synced', jfgzid=9001 WHERE id=?", (rid,))
+        self.db.get_conn().commit()
         with self.assertRaises(self.rules.RuleError):
             # C001 不是报工人，冒充申请改量
             self.rules.check_change_request(rid, 50, "想改", "C001")
@@ -168,6 +171,9 @@ class TestChangeOwnership(ScanTestCase):
         self.add_bundle("ZD1", 1, 1, 100)
         rid = self.db.create_report("S1", "ZD1", 1, 1, 1, "打洞纽扣",
                                     "C002", "员工测试", 100, 0.5)["id"]
+        self.db.get_conn().execute(
+            "UPDATE report SET status='synced', jfgzid=9001 WHERE id=?", (rid,))
+        self.db.get_conn().commit()
         with self.assertRaises(self.rules.RuleError):
             self.rules.check_change_request(rid, 50, "   ", "C002")
 
@@ -177,6 +183,9 @@ class TestChangeOwnership(ScanTestCase):
         self.add_bundle("ZD1", 1, 1, 100)      # 必须有应做数，否则上限校验会先拦下
         rid = self.db.create_report("S1", "ZD1", 1, 1, 1, "打洞纽扣",
                                     "C002", "员工测试", 100, 0.5)["id"]
+        self.db.get_conn().execute(
+            "UPDATE report SET status='synced', jfgzid=9001 WHERE id=?", (rid,))
+        self.db.get_conn().commit()
         self.rules.check_change_request(rid, 50, "第一次", "C002")
         self.db.create_change(rid, "C002", "员工测试", 50, "第一次")
         with self.assertRaises(ValueError):

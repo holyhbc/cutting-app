@@ -758,10 +758,13 @@ def _page_shell(title, body, extra_head=""):
 <body><div class="wrap">{body}</div></body></html>"""
 
 
-def page_change_apply(rep, token, err="", mine=None):
-    """工人申请改量。"""
-    body = [f'<div class="card"><h1>修改报工数量</h1>'
-            f'<p class="sub">改量需要主管审批，通过后才生效。</p>'
+def page_change_apply(rep, token, err="", mine=None, by_supervisor=False):
+    """工人申请改量 / 主管代改。"""
+    tip = ("你是主管，改完直接生效，不用再等审批。" if by_supervisor
+           else "改量需要主管审批，通过后才生效。")
+    title = "主管代改报工" if by_supervisor else "申请修改报工数量"
+    body = [f'<div class="card"><h1>{title}</h1>'
+            f'<p class="sub">{tip}</p>'
             f'<div class="kv"><span class="k">员工</span>'
             f'<span class="v">{esc(rep["ygname"])}（{esc(rep["ygno"])}）</span></div>'
             f'<div class="kv"><span class="k">定单</span><span class="v">{esc(rep["zdno"])}</span></div>'
@@ -778,7 +781,7 @@ def page_change_apply(rep, token, err="", mine=None):
                  "rejected": "被驳回"}[st]
         cls = {"pending": "", "approved": "ok-msg", "rejected": "err"}[st]
         body.append(
-            f'<div class="card {cls}"><h2>我的申请</h2>'
+            f'<div class="card {cls}"><h2>{"改量记录" if by_supervisor else "我的申请"}</h2>'
             f'<p>{rep["js"]} 件 → {mine["new_num"]} 件（{label}）</p>'
             f'<p class="muted">理由：{esc(mine["reason"])}</p>'
             + (f'<p class="muted">驳回原因：{esc(mine["approve_note"] or "")}</p>'
@@ -796,7 +799,7 @@ def page_change_apply(rep, token, err="", mine=None):
         f'<label>改成多少件</label>'
         f'<input name="new_js" type="number" inputmode="numeric" min="1" '
         f'value="{rep["js"]}" required>'
-        f'<label>改量理由（必填，主管要凭这个判断）</label>'
+        f'<label>{"改量理由（必填，会记进审计）" if by_supervisor else "改量理由（必填，主管要凭这个判断）"}</label>'
         f'<input name="reason" placeholder="例如：少算了 5 件，实际只裁了 45 件" required>'
         f'<button type="submit">提交审批</button>'
         f'<a class="btn ghost" href="/s/' + esc(rep["short_id"] or "") + '?t=' + esc(token) + '">'
@@ -1387,16 +1390,31 @@ class Handler(BaseHTTPRequestHandler):
                 if not me:
                     return self._send(403, _page_shell("请先登录",
                         '<div class="card"><h1>请先登录</h1></div>'))
+                rep0 = D.get_report(int(data.get("report_id", 0) or 0))
+                if not rep0:
+                    return self._send(400, _page_shell("出错了",
+                        '<div class="card"><h1>出错了</h1>'
+                        '<p>报工记录不存在</p></div>'))
+                is_sup = R.is_supervisor(me["ygno"])
+                if rep0["ygno"] != me["ygno"] and not is_sup:
+                    # 非本人且非主管，直接 403，别落到下面的业务校验里
+                    return self._send(403, _page_shell("无权限",
+                        '<div class="card"><h1>无权限</h1>'
+                        '<p class="sub">只能修改自己的报工。</p></div>'))
                 rep, new_js = R.check_change_request(
-                    int(data.get("report_id", 0)), data.get("new_js"),
-                    data.get("reason"), me["ygno"])
-                cid = D.create_change(rep["id"], me["ygno"], me["ygname"],
-                                      new_js, str(data.get("reason", "")).strip())
-                mine = D.list_changes(status=None, ygno=me["ygno"], limit=1)
-                mine = mine[0] if mine and mine[0]["id"] == cid else {"status": "pending",
+                    rep0["id"], data.get("new_js"),
+                    data.get("reason"), me["ygno"], supervisor=is_sup)
+                cid = D.create_change(rep["id"], rep["ygno"], rep["ygname"],
+                                      new_js, str(data.get("reason", "")).strip(),
+                                      approved_by=(me["ygno"] if is_sup else ""),
+                                      note=str(data.get("reason", "")).strip())
+                mine = D.list_changes(status=None, ygno=rep["ygno"], limit=5)
+                mine = next((m for m in mine if m["id"] == cid), {
+                        "status": "approved" if is_sup else "pending",
                         "new_num": new_js, "reason": str(data.get("reason", "")),
-                        "created_at": "", "approve_note": ""}
-                return self._send(200, page_change_apply(rep, token, mine=mine))
+                        "created_at": "", "approve_note": ""})
+                return self._send(200, page_change_apply(
+                    rep, token, mine=mine, by_supervisor=is_sup))
             except R.RuleError as e:
                 rep = D.get_report(int(data.get("report_id", 0) or 0))
                 if not rep:
@@ -1416,18 +1434,29 @@ class Handler(BaseHTTPRequestHandler):
         rep = D.get_report(rid)
         if not rep:
             return self._send(404, page_notfound(""))
-        if rep["ygno"] != me["ygno"]:
+        is_sup = R.is_supervisor(me["ygno"])
+        if rep["ygno"] != me["ygno"] and not is_sup:
             return self._send(403, _page_shell("无权限",
                 '<div class="card"><h1>无权限</h1>'
                 '<p class="sub">只能修改自己的报工。</p></div>'))
-        mine = D.list_changes(status=None, ygno=me["ygno"], limit=50)
+        mine = D.list_changes(status=None, ygno=rep["ygno"], limit=50)
         mine = next((m for m in mine if m["report_id"] == rid), None)
-        return self._send(200, page_change_apply(rep, token, mine=mine))
+        return self._send(200, page_change_apply(rep, token, mine=mine,
+                                                 by_supervisor=is_sup))
 
     def _read_json_form(self):
+        """读 application/x-www-form-urlencoded 表单，返回「单值」字典。
+
+        注意不能直接把 parse_qs 的结果丢给业务用 ——
+        它的值是 list（{'token': ['abc']}），
+        拿去当字符串用会报 "type 'list' is not supported"，
+        POST /change 就是这么坏的。
+        """
         try:
             n = int(self.headers.get("Content-Length", 0))
-            return parse_qs(self.rfile.read(n).decode("utf-8"))
+            raw = parse_qs(self.rfile.read(n).decode("utf-8"))
+            return {k: (v[0] if isinstance(v, list) and v else "")
+                    for k, v in raw.items()}
         except Exception:
             return {}
 
@@ -1638,25 +1667,51 @@ class Handler(BaseHTTPRequestHandler):
         # 手机屏幕窄：状态不占一列，改用整行底色表示；
         # gx 编号已被工序名称取代，那一列换成颜色（工人真正关心认哪件衣服）。
         RC = {"synced": "r-sync", "pending": "r-wait", "failed": "r-fail"}
+        is_sup_here = R.is_supervisor(me["ygno"])
+        # 主管可以带 ygno 看别人的报工，工人只能看自己
+        view_ygno = (self._q("ygno") or me["ygno"]) if is_sup_here else me["ygno"]
+        rows = D.report_mine(dfrom, dto, view_ygno, 300)
+        summ = D.report_mine_summary(dfrom, dto, view_ygno)
         trs = []
         for r in rows:
             cls = RC.get(r.get("src"), "r-sync")
             note = ""
-            if r.get("src") == "failed":
+            act = ""
+            src = r.get("src")
+            if src == "failed":
                 note = ('<div style="font-size:11px;color:#c0392b">'
                         '没报上：超量等</div>')
-            elif r.get("src") == "pending":
+                # 失败的报工没有 jfgzid，改量无处落地，只能作废后重报
+                act = '<span style="font-size:11px;color:#999">请主管作废</span>'
+            elif src == "pending":
                 note = ('<div style="font-size:11px;color:#b26a00">'
                         '待同步</div>')
+                act = '<span style="font-size:11px;color:#999">等同步</span>'
+            elif r.get("id"):
+                lbl = "主管改量" if is_sup_here else "申请改量"
+                act = (f'<a href="/change?report_id={r["id"]}&t={esc(tok)}" '
+                       f'style="font-size:12px;color:#1a73a8">{lbl}</a>')
             trs.append(
                 (cls, [str(r["gzdate"])[:16] + note, r["zdno"],
                        (r["gxname"] or "—"),
                        (r.get("yn") or "—"),
                        (r.get("zh") if r.get("zh") is not None else "—"),
-                       r["js"], f'{float(r["je"] or 0):.2f}']))
-        head = (f'<div class="card"><h1>👤 我的报工</h1>'
-                f'<p class="sub">{esc(me["ygname"])}（{esc(me["ygno"])}）　'
-                f'{dfrom} ~ {dto}</p>'
+                       r["js"], f'{float(r["je"] or 0):.2f}', act]))
+        who = (f'{esc(me["ygname"])}（{esc(me["ygno"])}）' if view_ygno == me["ygno"]
+               else f'{esc(view_ygno)} 的报工')
+        picker = ""
+        if is_sup_here:
+            opts = "".join(
+                f'<option value="{esc(y)}">'
+                f'{"✓ " if y == view_ygno else ""}{esc(y)}</option>'
+                for y in D.list_report_workers())
+            picker = ('<p class="sub" style="margin-top:10px">看谁的报工（可代改）</p>'
+                      '<select style="width:100%" onchange="location.href='
+                      "'/report/mine?t=" + esc(tok) + "&ygno='+this.value\">"
+                      + opts + '</select>')
+        head = (f'<div class="card"><h1>👤 '
+                f'{"主管代改" if is_sup_here else "我的报工"}</h1>'
+                f'<p class="sub">{who}　{dfrom} ~ {dto}</p>'
                 f'<div class="kv"><span class="k">报工笔数</span>'
                 f'<span class="v">{summ["cnt"]}</span></div>'
                 f'<div class="kv"><span class="k">合计件数</span>'
@@ -1671,6 +1726,7 @@ class Handler(BaseHTTPRequestHandler):
                    f'标红的 {summ["failed"]} 笔<b>没有报上</b>'
                    f'（多半是超过这扎应做数），请找主管作废后重新报。</p>'
                    if summ.get("failed") else "")
+                + picker
                 + '<form method="GET" action="/report/mine" style="margin-top:10px">'
                   f'<input type="hidden" name="t" value="{esc(tok)}">'
                   '<p class="sub" style="margin:6px 0 4px">开始</p>'
@@ -1686,7 +1742,7 @@ class Handler(BaseHTTPRequestHandler):
             body.append('<div class="card"><p class="muted">'
                         '这段时间没有报工记录。</p></div>')
             return self._send(200, _page_shell("我的报工", "".join(body)))
-        heads = ["时间", "定单", "工序名称", "颜色", "扎", "件数", "金额"]
+        heads = ["时间", "定单", "工序名称", "颜色", "扎", "件数", "金额", ""]
         cells = "".join(f"<th>{esc(h)}</th>" for h in heads)
         tr_html = ""
         for cls, t in trs:
