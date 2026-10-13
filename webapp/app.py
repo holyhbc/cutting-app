@@ -89,6 +89,10 @@ a.btn{display:block;text-align:center;width:100%;padding:13px;
       font-size:16px;text-decoration:none;margin-bottom:9px;box-sizing:border-box}
 a.btn.ghost{background:#f0f0f0;color:#333}
 a.btn:last-child{margin-bottom:0}
+/* 表格里的小按钮 */
+button.disc{padding:6px 12px;font-size:12px;border:0;border-radius:7px;
+            background:#c0392b;color:#fff;cursor:pointer;white-space:nowrap}
+button.disc:active{opacity:.75}
 /* 报工明细：手机屏幕窄，用整行底色表示同步状态，省掉一列 */
 table.rep{width:100%;border-collapse:collapse;font-size:14px}
 table.rep th{background:#eef1f6;color:#333;font-weight:600;padding:9px 6px;
@@ -625,7 +629,7 @@ def page_admin_reports(rows, token, kind):
     cells = ""
     if rows:
         cells = "".join(f"<th>{esc(h)}</th>" for h in
-                        ["报工人", "定单", "扎", "工序", "件数", "时间", "说明"])
+                        ["报工人", "定单", "扎", "工序", "件数", "时间", "说明", ""])
         trs = ""
         for r in rows:
             err = (r.get("last_err") or "").strip()
@@ -637,7 +641,9 @@ def page_admin_reports(rows, token, kind):
                     f'<td>{esc(str(r["gzdate"])[:16])}</td>'
                     f'<td style="white-space:normal;max-width:160px;font-size:12px;'
                     f'color:{"#c0392b" if err else "#888"}">'
-                    f'{esc(err[:60] if err else ("jfgzid=" + str(r["jfgzid"]) if r.get("jfgzid") else ""))}</td></tr>')
+                    f'{esc(err[:60] if err else ("jfgzid=" + str(r["jfgzid"]) if r.get("jfgzid") else ""))}'
+                    f'</td><td><button class="btn disc" '
+                    f'onclick="discard({r["id"]})">作废</button></td></tr>')
         table = (f'<div style="overflow-x:auto"><table class="rep">'
                  f'<tr>{cells}</tr>{trs}</table></div>')
     else:
@@ -651,10 +657,23 @@ def page_admin_reports(rows, token, kind):
             f'<div class="card"><h2>切换</h2>{tabs}</div>',
             f'<div class="card">{table}</div>']
     if kind == "failed":
-        body.append(f'<div class="card"><p class="muted">'
-                    '<b>怎么办</b>：这些报工被服务器拒绝了（超量、工序不存在等），'
-                    '需要班组长在电脑上处理，或让工人走「改量审批」重新报。'
-                    '</p></div>')
+        body.append(f'<div class="card"><p class="sub">'
+                    '<b>怎么办</b>：这些报工被服务器拒绝了（超量、工序不存在等）。'
+                    '重试没用，得先处理原因：<br>'
+                    '· 超量的 → 让工人核对数量，确实报多了就<b>作废</b>这条，'
+                    '正确的数重新报；已报进去的要改，走「改量审批」。<br>'
+                    '· 工序不存在的 → 标签可能印错了，重新印标签。<br>'
+                    '作废后件数不再计入统计。</p></div>'
+                    '<script>function discard(id){'
+                    ' if(!confirm("确定作废这条报工？作废后不能恢复。")) return;'
+                    ' fetch("/api/report/discard",{method:"POST",'
+                    ' headers:{"Content-Type":"application/json"},'
+                    ' body:JSON.stringify({id:id,token:"' + esc(token) + '"})})'
+                    ' .then(function(r){return r.json();})'
+                    ' .then(function(d){ if(d.ok){location.reload();}'
+                    '   else {alert(d.msg||"作废失败");} })'
+                    ' .catch(function(){alert("网络错误");});'
+                    '}</script>')
     elif kind == "pending":
         body.append(f'<div class="card"><p class="muted">'
                     '<b>怎么办</b>：等局域网电脑跑一次同步器即可自动写回数据库，'
@@ -1231,6 +1250,35 @@ class Handler(BaseHTTPRequestHandler):
             D.log_audit("error", f"GET {path}: {e}", self.client_address[0])
             return self._send(500, f"<h1>500</h1><pre>{esc(e)}</pre>", head_only=head_only)
 
+    def _handle_report_discard(self):
+        """作废一条未同步的报工。
+
+        同步失败的报工会永远卡在那里（重试也没用，因为是业务规则拒绝），
+        必须给一条出路：作废掉，件数不再计入统计。
+        """
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+            data = json.loads(self.rfile.read(n).decode("utf-8")) if n else {}
+            rid = int(data.get("id", 0) or 0)
+            if rid <= 0:
+                return self._json({"ok": False, "msg": "报工编号无效"}, 400)
+            me = R.whoami(data.get("token") or "")
+            # 工人只能作废自己的；主管不限
+            ygno = None if (me and R.is_supervisor(me["ygno"])) else (
+                me["ygno"] if me else "")
+            if not me:
+                return self._json({"ok": False, "msg": "请先登录"}, 401)
+            ok, msg = D.discard_report(rid, ygno)
+            D.log_audit("report_discard", msg,
+                        self.client_address[0])
+            return self._json({"ok": ok, "msg": msg,
+                               "stats": D.stats() if ok else None})
+        except ValueError:
+            return self._json({"ok": False, "msg": "报工编号无效"}, 400)
+        except Exception as e:
+            D.log_audit("report_discard_error", str(e), self.client_address[0])
+            return self._json({"ok": False, "msg": str(e)}, 400)
+
     def _handle_login(self):
         """登录：工号 或 手机号 + PIN。"""
         try:
@@ -1541,8 +1589,15 @@ class Handler(BaseHTTPRequestHandler):
         trs = []
         for r in rows:
             cls = RC.get(r.get("src"), "r-sync")
+            note = ""
+            if r.get("src") == "failed":
+                note = ('<div style="font-size:11px;color:#c0392b">'
+                        '没报上：超量等</div>')
+            elif r.get("src") == "pending":
+                note = ('<div style="font-size:11px;color:#b26a00">'
+                        '待同步</div>')
             trs.append(
-                (cls, [str(r["gzdate"])[:16], r["zdno"],
+                (cls, [str(r["gzdate"])[:16] + note, r["zdno"],
                        (r["gxname"] or "—"),
                        (r.get("yn") or "—"),
                        (r.get("zh") if r.get("zh") is not None else "—"),
@@ -1560,6 +1615,10 @@ class Handler(BaseHTTPRequestHandler):
                    f'其中 {summ["pending"]} 笔还没同步到服务器，'
                    f'不影响计件，等当天同步后自动并入。</p>'
                    if summ["pending"] else "")
+                + (f'<p class="sub" style="margin-top:8px;color:#c0392b">'
+                   f'标红的 {summ["failed"]} 笔<b>没有报上</b>'
+                   f'（多半是超过这扎应做数），请找主管作废后重新报。</p>'
+                   if summ.get("failed") else "")
                 + '<form method="GET" action="/report/mine" style="margin-top:10px">'
                   f'<input type="hidden" name="t" value="{esc(tok)}">'
                   '<p class="sub" style="margin:6px 0 4px">开始</p>'
@@ -1746,6 +1805,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_reports_push()
         if path == "/api/ack":
             return self._handle_ack()
+        if path == "/api/report/discard":
+            return self._handle_report_discard()
         if path == "/api/login":
             return self._handle_login()
         if path == "/api/logout":

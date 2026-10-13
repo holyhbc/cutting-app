@@ -291,3 +291,57 @@ if __name__ == "__main__":
     import urllib.parse
     os.environ["HBC_QUIET_MIGRATE"] = "1"
     unittest.main(verbosity=2)
+
+class TestDiscardApi(HTTPTestCase):
+    """作废接口的权限边界。"""
+
+    def setUp(self):
+        super().setUp()
+        self.add_employee("C001", "测试主管")
+        self.add_employee("C002", "员工测试")
+        self.add_process("ZD1", 1, "打洞纽扣", 0.5)
+        self.add_bundle("ZD1", 1, 1, 100)
+        rid = self.db.create_report("S", "ZD1", 1, 1, 1, "打洞纽扣",
+                                    "C002", "员工测试", 150, 0.5)["id"]
+        self.db.get_conn().execute(
+            "UPDATE report SET status='failed', last_err='超量' WHERE id=?",
+            (rid,))
+        self.db.get_conn().commit()
+        self.rid = rid
+        self.sup = self.login("C001")
+        self.worker = self.login("C002")
+
+    def test_工人作废自己的(self):
+        code, d = self.post_json("/api/report/discard",
+                                 {"id": self.rid, "token": self.worker})
+        self.assertEqual(code, 200)
+        self.assertTrue(d["ok"], d)
+        self.assertEqual(self.db.get_report(self.rid)["status"], "discarded")
+
+    def test_工人不能作废别人的(self):
+        rid2 = self.db.create_report("S2", "ZD1", 1, 1, 1, "打洞纽扣",
+                                     "C001", "测试主管", 10, 0.5)["id"]
+        code, d = self.post_json("/api/report/discard",
+                                 {"id": rid2, "token": self.worker})
+        self.assertFalse(d["ok"])
+        self.assertIn("自己的", d["msg"])
+
+    def test_未登录不能作废(self):
+        code, d = self.post_json("/api/report/discard", {"id": self.rid})
+        self.assertFalse(d["ok"])
+        self.assertIn("登录", d["msg"])
+
+    def test_已同步的不能作废(self):
+        self.db.get_conn().execute(
+            "UPDATE report SET status='synced', jfgzid=1 WHERE id=?", (self.rid,))
+        self.db.get_conn().commit()
+        code, d = self.post_json("/api/report/discard",
+                                 {"id": self.rid, "token": self.sup})
+        self.assertFalse(d["ok"])
+        self.assertIn("改量", d["msg"])
+
+    def test_失败列表有作废按钮(self):
+        code, body = self.get("/admin/failed", self.sup)
+        self.assertEqual(code, 200)
+        self.assertIn("作废", body)
+        self.assertIn("/api/report/discard", body)

@@ -286,3 +286,61 @@ if __name__ == "__main__":
     import os
     os.environ["HBC_QUIET_MIGRATE"] = "1"
     unittest.main(verbosity=2)
+
+class TestDiscard(ScanTestCase):
+    """作废未同步的报工 —— 失败报工唯一的出路。"""
+
+    def setUp(self):
+        super().setUp()
+        self.add_employee("C001", "主管")
+        self.add_employee("C002", "工人乙")
+        self.add_process("ZD1", 1, "打洞纽扣", 0.5)
+        self.add_bundle("ZD1", 1, 1, 100)
+        self.rid = self.db.create_report(
+            "S", "ZD1", 1, 1, 1, "打洞纽扣", "C002", "工人乙", 150, 0.5)["id"]
+        self.db.get_conn().execute(
+            "UPDATE report SET status='failed', last_err='超量' WHERE id=?",
+            (self.rid,))
+        self.db.get_conn().commit()
+
+    def test_作废失败报工(self):
+        ok, msg = self.db.discard_report(self.rid, "C002")
+        self.assertTrue(ok, msg)
+        r = self.db.get_report(self.rid)
+        self.assertEqual(r["status"], "discarded")
+
+    def test_已同步的不许作废(self):
+        """铁律：已进 jfgz 的不能直接删，否则账实不符。"""
+        self.db.get_conn().execute(
+            "UPDATE report SET status='synced', jfgzid=999 WHERE id=?",
+            (self.rid,))
+        self.db.get_conn().commit()
+        ok, msg = self.db.discard_report(self.rid, None)
+        self.assertFalse(ok)
+        self.assertIn("改量", msg)
+
+    def test_不能作废别人的(self):
+        ok, msg = self.db.discard_report(self.rid, "C001")
+        self.assertFalse(ok)
+        self.assertIn("自己的", msg)
+
+    def test_主管可以作废任何人的(self):
+        ok, msg = self.db.discard_report(self.rid, None)
+        self.assertTrue(ok, msg)
+
+    def test_不存在的记录(self):
+        ok, msg = self.db.discard_report(99999, None)
+        self.assertFalse(ok)
+
+    def test_作废后不计入工人统计(self):
+        import datetime
+        today = datetime.date.today().isoformat()
+        self.assertEqual(len(self.db.report_mine("2020-01-01", today, "C002")), 1)
+        self.db.discard_report(self.rid, "C002")
+        self.assertEqual(len(self.db.report_mine("2020-01-01", today, "C002")), 0)
+        self.assertEqual(self.db.report_mine_summary(
+            "2020-01-01", today, "C002")["pcs"], 0)
+
+    def test_作废状态不计入待同步(self):
+        rows = self.db.list_reports("pending", 50)
+        self.assertEqual(len(rows), 0, "作废的不能再被同步器捡走")

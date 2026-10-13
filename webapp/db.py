@@ -282,6 +282,32 @@ def list_failed(limit=100):
     return [dict(r) for r in rows]
 
 
+def discard_report(id_, ygno=None):
+    """作废一条尚未同步的报工。
+
+    只允许作废 pending / failed —— 这两种都**还没进 jfgz**，
+    删掉不会造成账实不符。已同步的不行：那条已经写进 jfgz 了，
+    要撤销必须走 jfzg_change 改量审批，不能直接删（铁律 D-005）。
+
+    ygno 传入时表示「只能作废自己的」，主管传 None 表示不限。
+    返回 (成功, 说明)
+    """
+    rep = get_report(id_)
+    if not rep:
+        return False, "报工记录不存在"
+    if rep["status"] == "synced" or rep.get("jfgzid"):
+        return False, "这条已经同步到数据库了，不能直接作废；请走改量审批"
+    if ygno and rep["ygno"] != ygno:
+        return False, "只能作废自己的报工"
+    with _write_lock:
+        conn = get_conn()
+        conn.execute(
+            "UPDATE report SET status='discarded', synced_at=?, last_err=? WHERE id=?",
+            (now_str(), "已作废", int(id_)))
+        conn.commit()
+    return True, f"已作废 #{id_}（{rep['zdno']} 扎{rep['zh']} {rep['js']}件）"
+
+
 def list_reports(status="synced", limit=200, ygno=None):
     """按状态列报工。主管看全部，工人只能看自己。"""
     sql = "SELECT * FROM report WHERE 1=1"
@@ -775,7 +801,8 @@ def report_mine(dfrom, dto, ygno, limit=100):
         "       COALESCE((SELECT MIN(yn) FROM bundle b "
         "                 WHERE b.zdno=r.zdno AND b.cc=r.cc AND b.zh=r.zh),'') yn, "
         "       r.status src FROM report r"
-        " WHERE r.ygno=? AND date(r.gzdate)>=? AND date(r.gzdate)<=? AND r.jfgzid IS NULL"
+        " WHERE r.ygno=? AND date(r.gzdate)>=? AND date(r.gzdate)<=?"
+        "   AND r.jfgzid IS NULL AND r.status<>'discarded'"
         " ORDER BY r.gzdate DESC, r.id DESC LIMIT ?",
         (ygno, dfrom, dto, int(limit))).fetchall()]
     # 本地暂存的时间戳带时分秒，历史只有日期，统一截断到分钟便于排序
@@ -792,5 +819,6 @@ def report_mine_summary(dfrom, dto, ygno):
         "cnt": len(rows),
         "pcs": sum(int(r["js"] or 0) for r in rows),
         "amt": sum(float(r["je"] or 0) for r in rows),
-        "pending": sum(1 for r in rows if r.get("src") in ("pending", "failed")),
+        "pending": sum(1 for r in rows if r.get("src") == "pending"),
+        "failed": sum(1 for r in rows if r.get("src") == "failed"),
     }
