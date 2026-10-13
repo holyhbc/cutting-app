@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import socket
 import sys
 import tempfile
 import threading
@@ -144,9 +145,29 @@ class FakeCursor:
         return [s for s, _ in self.log if kw in s.upper()]
 
 
-def start_local_server(app_module, port):
-    """起一个真实的本地 HTTP 服务（随机可用端口），测完必须 shutdown。"""
-    srv = app_module.ThreadingHTTPServer(("127.0.0.1", port), app_module.Handler)
-    t = threading.Thread(target=srv.serve_forever, daemon=True)
-    t.start()
-    return srv
+def start_local_server(app_module, port=None, retries=8):
+    """起一个本地 HTTP 服务。
+
+    port=None 时让内核分配一个空闲端口。
+    注意：先探测再关闭、再让服务器绑定，中间存在竞态 ——
+    那个端口可能被别的进程抢走，导致偶发失败（CI 上尤其明显）。
+    这里绑定失败就重试，直到成功为止。
+    """
+    last = None
+    for _ in range(retries):
+        if port is None:
+            s = socket.socket()
+            s.bind(("127.0.0.1", 0))
+            p = s.getsockname()[1]
+            s.close()
+        else:
+            p = port
+        try:
+            srv = app_module.ThreadingHTTPServer(("127.0.0.1", p),
+                                               app_module.Handler)
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            return srv
+        except OSError as e:
+            last = e
+            port = None if port is not None else None
+    raise RuntimeError(f"本地测试服务器起不来: {last}")

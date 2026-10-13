@@ -19,14 +19,6 @@ import urllib.request
 from base import ScanTestCase, start_local_server
 
 
-def _free_port():
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    p = s.getsockname()[1]
-    s.close()
-    return p
-
-
 class HTTPTestCase(ScanTestCase):
     def setUp(self):
         super().setUp()
@@ -35,9 +27,9 @@ class HTTPTestCase(ScanTestCase):
         # 服务端每请求打一行日志，20 个用例能把输出淹掉
         self._real_log = app.Handler.log_message
         app.Handler.log_message = lambda *a, **k: None
-        self.port = _free_port()
-        self.srv = start_local_server(app, self.port)
-        self.base = f"http://127.0.0.1:{self.port}"
+        # 端口由内核分配并在绑定失败时自动重试，避免偶发失败
+        self.srv = start_local_server(app)
+        self.base = f"http://127.0.0.1:{self.srv.server_address[1]}"
 
     def tearDown(self):
         self.srv.shutdown()
@@ -620,3 +612,56 @@ class TestMineTableNotBroken(HTTPTestCase):
         # 状态列必须是活的标签而不是文字
         self.assertIn('<span style="font-size:11px;color:#b26a00">待同步</span>',
                       body)
+
+
+class TestChangeLinkId(HTTPTestCase):
+    """回归：「申请改量」链接曾把 jfgzid 当成 report_id 传出去。
+
+    /change?report_id= 查的是本地 report 表，
+    传 jfgzid 进去查不到记录，返回的却是
+    「标签未同步」页 —— 和二维码问题毫无关系，纯粹误导。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.add_employee("C002", "员工测试")
+        self.add_process("ZD1", 1, "打洞纽扣", 0.5)
+        self.add_bundle("ZD1", 1, 11, 100)
+        self.rid = self.db.create_report(
+            "S", "ZD1", 1, 11, 1, "打洞纽扣", "C002", "员工测试", 40, 0.5)["id"]
+        self.db.get_conn().execute(
+            "UPDATE report SET status='synced', jfgzid=129432 WHERE id=?",
+            (self.rid,))
+        self.db.get_conn().commit()
+        self.push_reports([(129432, "2026-10-12 10:00:00", "C002", "员工测试",
+                            "ZD1", 1, 1, 11, 40, 0.5, 20.0, 1)])
+        self.tok = self.login("C002")
+
+    def test_链接用的是本地report_id(self):
+        import re
+        code, body = self.get("/report/mine", self.tok)
+        m = re.search(r"/change\?report_id=(\d+)", body)
+        self.assertTrue(m, "应该有申请改量链接")
+        self.assertEqual(int(m.group(1)), self.rid)
+        self.assertNotEqual(int(m.group(1)), 129432, "不能把 jfgzid 当 report_id")
+
+    def test_链接点进去不是404也不是标签未同步(self):
+        import re
+        code, body = self.get("/report/mine", self.tok)
+        rid = re.search(r"/change\?report_id=(\d+)", body).group(1)
+        code, body = self.get(f"/change?report_id={rid}", self.tok)
+        self.assertEqual(code, 200)
+        self.assertNotIn("标签还没同步", body, "改量页不该显示二维码的提示页")
+        self.assertIn("申请修改报工数量", body)
+
+    def test_别处报的历史工不给改量入口(self):
+        """本系统没有对应 report 行的历史数据，不该给改量入口。"""
+        self.push_reports([(999999, "2026-10-11 10:00:00", "C002", "员工测试",
+                            "ZD2", 1, 1, 1, 30, 0.5, 15.0, 1)])
+        self.db.get_conn().execute(
+            "INSERT OR REPLACE INTO process VALUES ('ZD2',1,'压下摆',0.5)")
+        self.db.get_conn().commit()
+        import re
+        code, body = self.get("/report/mine", self.tok)
+        links = re.findall(r"/change\?report_id=(\d+)", body)
+        self.assertNotIn("999999", links)

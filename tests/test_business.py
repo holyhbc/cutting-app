@@ -72,6 +72,43 @@ class TestReportRules(ScanTestCase):
         b = self.db.create_report("SID", "ZD1", 1, 1, 1, "打洞纽扣",
                                   "C002", "员工测试", 10, 0.5)
         self.assertEqual(a["id"], b["id"])
+        self.assertTrue(b["duplicated"])
+
+    def test_连点两次跨秒也只算一条(self):
+        """回归：数据库唯一索引的键里带 gzdate（秒级），
+        两次提交只要隔一秒就能各插一条 —— 手机慢一点连点就翻倍。
+        这里把第二条的时间戳改到 3 秒后，模拟跨秒，仍必须判重。
+        """
+        self.db.upsert_scan_map("SID", "ZD1", 1, 1)
+        a = self.db.create_report("SID", "ZD1", 1, 1, 1, "打洞纽扣",
+                                  "C002", "员工测试", 10, 0.5)
+        later = (datetime.datetime.now() - datetime.timedelta(seconds=3)
+                 ).strftime("%Y-%m-%d %H:%M:%S")
+        self.db.get_conn().execute("UPDATE report SET gzdate=? WHERE id=?",
+                                   (later, a["id"]))
+        self.db.get_conn().commit()
+        b = self.db.create_report("SID", "ZD1", 1, 1, 1, "打洞纽扣",
+                                  "C002", "员工测试", 10, 0.5)
+        self.assertEqual(a["id"], b["id"],
+                         "时间窗内的重复提交必须被判为同一条")
+        n = self.db.get_conn().execute(
+            "SELECT COUNT(*) FROM report WHERE short_id='SID'").fetchone()[0]
+        self.assertEqual(n, 1, "库里只能有一条")
+
+    def test_超过时间窗才算新报工(self):
+        """时间窗外（比如工人十分钟后又报一次）应当是新记录。"""
+        self.db.upsert_scan_map("SID", "ZD1", 1, 1)
+        a = self.db.create_report("SID", "ZD1", 1, 1, 1, "打洞纽扣",
+                                  "C002", "员工测试", 10, 0.5)
+        old = (datetime.datetime.now() - datetime.timedelta(
+            seconds=self.db.IDEM_WINDOW_SEC + 60)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        self.db.get_conn().execute("UPDATE report SET gzdate=? WHERE id=?",
+                                   (old, a["id"]))
+        self.db.get_conn().commit()
+        b = self.db.create_report("SID", "ZD1", 1, 1, 1, "打洞纽扣",
+                                  "C002", "员工测试", 10, 0.5)
+        self.assertNotEqual(a["id"], b["id"], "超出时间窗应视为新报工")
 
 
 class TestChangeRules(ScanTestCase):

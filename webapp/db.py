@@ -10,7 +10,7 @@
 import os
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("SCAN_DB", os.path.join(BASE_DIR, "scan.db"))
@@ -216,12 +216,34 @@ def get_processes(zdno):
 
 # ---------------------------------------------------------------- 报工
 
+IDEM_WINDOW_SEC = 120   # 同一笔报工的判重时间窗（秒）
+
+
 def create_report(short_id, zdno, cc, zh, gx, gxname, ygno, ygname, js, dj, ip=""):
-    """新增报工。幂等：唯一索引冲突时返回已有记录的 id，不重复计入。"""
+    """新增报工。
+
+    幂等：同一标签+扎+工序+员工+数量，在 IDEM_WINDOW_SEC 秒内只算一条。
+
+    为什么不能只靠数据库唯一索引：
+    ux_report_idem 的键里带 gzdate，而 gzdate 只精确到秒 ——
+    手机慢一点、工人连点两下「提交」，两笔间隔一两秒就会各插一条，
+    数量直接翻倍。所以判重必须在应用层按时间窗做。
+    数据库索引只作为「同一秒内」的兜底。
+    """
     je = round(float(js) * float(dj), 4)
     stamp = now_str()
     with _write_lock:
         conn = get_conn()
+        # 先按时间窗查重
+        since = (datetime.now() - timedelta(
+            seconds=IDEM_WINDOW_SEC)).strftime("%Y-%m-%d %H:%M:%S")
+        dup = conn.execute(
+            "SELECT id FROM report WHERE short_id=? AND zdno=? AND cc=? AND zh=? "
+            "AND gx=? AND ygno=? AND js=? AND gzdate>=? ORDER BY id DESC LIMIT 1",
+            (short_id, zdno, int(cc), int(zh), int(gx), ygno, int(js), since)
+        ).fetchone()
+        if dup:
+            return {"id": dup[0], "created": False, "duplicated": True}
         try:
             conn.execute(
                 "INSERT INTO report (short_id, zdno, cc, zh, gx, gxname, ygno, ygname, "
@@ -801,10 +823,16 @@ def report_mine(dfrom, dto, ygno, limit=100):
     # jfdj 里压根没有对应工序，显示"—"是如实反映。
     # 颜色从 bundle 表关联（同一定单一扎只有一个颜色，bundle 主键含 yn）。
     hist = [dict(r) for r in get_conn().execute(
-        "SELECT r.jfgzid id, r.gzdate, r.ygno, r.zdno, r.gx, r.cc, r.zh, r.js, r.je, "
+        # id 必须是**本地 report 表的 id**，不是 jfgzid。
+    # /change?report_id= 查的是本地 report 表，
+    # 传 jfgzid 进去会 get_report 返回 None → 404。
+    # 本地没有对应行（别处报的历史工）就返回 NULL，前端不给「申请改量」入口 ——
+    # 那条报工不是本系统提交的，本来也改不了。
+    "SELECT lr.id, r.gzdate, r.ygno, r.zdno, r.gx, r.cc, r.zh, r.js, r.je, "
         "       COALESCE(p.gxname,'') gxname, "
         "       COALESCE(b.yn,'') yn, 'synced' src "
         "FROM jfgz_report r "
+        "LEFT JOIN report lr ON lr.jfgzid = r.jfgzid "
         "LEFT JOIN process p ON p.zdno=r.zdno AND p.gx=r.gx "
         "LEFT JOIN (SELECT zdno,cc,zh,MIN(yn) yn FROM bundle GROUP BY zdno,cc,zh) b "
         "       ON b.zdno=r.zdno AND b.cc=r.cc AND b.zh=r.zh "
