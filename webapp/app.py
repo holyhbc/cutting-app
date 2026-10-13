@@ -1678,28 +1678,32 @@ class Handler(BaseHTTPRequestHandler):
         trs = []
         for r in rows:
             cls = RC.get(r.get("src"), "r-sync")
-            note = ""
-            act = ""
             src = r.get("src")
+            # 状态提示单独占一列。不要塞进「时间」列里 ——
+            # 那列要转义防注入，塞进去就变成 &lt;div&gt; 源码显示出来。
             if src == "failed":
-                note = ('<div style="font-size:11px;color:#c0392b">'
-                        '没报上：超量等</div>')
-                # 失败的报工没有 jfgzid，改量无处落地，只能作废后重报
-                act = '<span style="font-size:11px;color:#999">请主管作废</span>'
+                status = ('<span style="font-size:11px;color:#c0392b">'
+                          '没报上</span><div style="font-size:11px;color:#999">'
+                          '请主管作废</div>')
             elif src == "pending":
-                note = ('<div style="font-size:11px;color:#b26a00">'
-                        '待同步</div>')
-                act = '<span style="font-size:11px;color:#999">等同步</span>'
-            elif r.get("id"):
+                status = ('<span style="font-size:11px;color:#b26a00">'
+                          '待同步</span>')
+            elif src == "discarded":
+                status = ('<span style="font-size:11px;color:#999">'
+                          '已作废</span>')
+            else:
+                status = ""
+            act = ""
+            if r.get("id"):
                 lbl = "主管改量" if is_sup_here else "申请改量"
                 act = (f'<a href="/change?report_id={r["id"]}&t={esc(tok)}" '
                        f'style="font-size:12px;color:#1a73a8">{lbl}</a>')
             trs.append(
-                (cls, [str(r["gzdate"])[:16] + note, r["zdno"],
+                (cls, [str(r["gzdate"])[:16], r["zdno"],
                        (r["gxname"] or "—"),
                        (r.get("yn") or "—"),
                        (r.get("zh") if r.get("zh") is not None else "—"),
-                       r["js"], f'{float(r["je"] or 0):.2f}', act]))
+                       r["js"], f'{float(r["je"] or 0):.2f}', status, act]))
         who = (f'{esc(me["ygname"])}（{esc(me["ygno"])}）' if view_ygno == me["ygno"]
                else f'{esc(view_ygno)} 的报工')
         picker = ""
@@ -1745,15 +1749,15 @@ class Handler(BaseHTTPRequestHandler):
             body.append('<div class="card"><p class="muted">'
                         '这段时间没有报工记录。</p></div>')
             return self._send(200, _page_shell("我的报工", "".join(body)))
-        heads = ["时间", "定单", "工序名称", "颜色", "扎", "件数", "金额", ""]
+        heads = ["时间", "定单", "工序名称", "颜色", "扎", "件数", "金额", "状态", ""]
         cells = "".join(f"<th>{esc(h)}</th>" for h in heads)
         tr_html = ""
         for cls, t in trs:
-            # 最后一列是操作按钮（本来就�� HTML），不能再 esc ——
-            # 一转义就会把 <a> 当文字显示出来，表格看起来整个乱掉。
-            # 前面的数据列才需要转义防注入。
-            tds = "".join(f"<td>{esc(str(c))}</td>" for c in t[:-1])
-            tds += f'<td>{t[-1]}</td>'
+            # 最后两列（状态、操作）本来就是 HTML，不能 esc ——
+            # 一转义就会把 <div>/<a> 当文字显示出来，表格看起来整个乱掉。
+            # 前面的数据列必须转义防注入，一列都不能少。
+            tds = "".join(f"<td>{esc(str(c))}</td>" for c in t[:-2])
+            tds += f'<td>{t[-2]}</td><td>{t[-1]}</td>'
             tr_html += f'<tr class="{cls}">{tds}</tr>'
         legend = ('<div class="legend">'
                   '<span><i style="background:#fff7e6"></i>待同步</span>'

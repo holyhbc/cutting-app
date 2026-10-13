@@ -583,3 +583,40 @@ class TestMineTableNotBroken(HTTPTestCase):
         code, body = self.get("/report/mine", self.tok)
         self.assertNotIn("<script>x</script>", body, "数据列没转义，有注入风险")
         self.assertIn("&lt;script&gt;", body)
+
+    def test_状态列不是源码(self):
+        """回归：状态小字（待同步/没报上）曾塞在「时间」列里，
+        跟着数据列一起被 esc，显示成 &lt;div&gt; 源码。
+        现在状态单独成列且免转义。"""
+        self.db.create_report("S2", "ZD1", 1, 11, 2, "裤线头",
+                              "C002", "员工测试", 20, 0.3)
+        code, body = self.get("/report/mine", self.tok)
+        self.assertEqual(code, 200)
+        self.assertNotIn("&lt;div", body)
+        self.assertNotIn("&lt;span", body)
+        self.assertNotIn("&lt;a", body)
+        self.assertIn("<th>状态</th>", body)
+        self.assertIn("待同步", body)
+
+    def test_失败行标没报上且无转义残留(self):
+        rid = self.db.create_report("S3", "ZD1", 1, 11, 1, "打洞纽扣",
+                                    "C002", "员工测试", 999, 0.5)["id"]
+        self.db.get_conn().execute(
+            "UPDATE report SET status='failed', last_err='超量' WHERE id=?", (rid,))
+        self.db.get_conn().commit()
+        code, body = self.get("/report/mine", self.tok)
+        self.assertEqual(code, 200)
+        self.assertIn("没报上", body)
+        self.assertNotIn("&lt;", body, "不该有任何转义残留")
+
+    def test_状态列与操作列都不转义(self):
+        self.db.create_report("S4", "ZD1", 1, 11, 2, "裤线头",
+                              "C002", "员工测试", 20, 0.3)
+        import re
+        code, body = self.get("/report/mine", self.tok)
+        nhead = len(re.findall(r"<th>", body))
+        for m in re.finditer(r'<tr class="r-\w+">(.*?)</tr>', body, re.S):
+            self.assertEqual(len(re.findall(r"<td", m.group(1))), nhead)
+        # 状态列必须是活的标签而不是文字
+        self.assertIn('<span style="font-size:11px;color:#b26a00">待同步</span>',
+                      body)
