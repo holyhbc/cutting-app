@@ -1,0 +1,61 @@
+name: tests
+
+# 每次 push 和 PR 都跑。测试只用到标准库，
+# 不装 pyodbc（Linux 上装它要编译，慢且脆），10 秒内结束。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# 同一分支的新 push 取消旧任务，别排队
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.8", "3.11", "3.13"]
+
+    name: Python ${{ matrix.python-version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # 本来不想装任何依赖，但 GitHub 自带的 openpyxl 版本不确定，
+      # 装一个固定版本让「装了」和「没装」两条导出路径都能测到
+      - name: 装可选依赖
+        continue-on-error: true      # 装不上也不该让 CI 红
+        run: python -m pip install --quiet openpyxl
+
+      - name: 跑测试
+        run: python tests/run_all.py
+
+      - name: 语法检查（防止漏文件/语法错被测试漏过）
+        run: |
+          python -m compileall -q webapp cutt tests && echo "compileall OK"
+
+  # .cmd 是 ASCII 文件，中文注释会让 cmd.exe 执行乱码命令。
+  # 这条检查是真实踩坑后加的：曾因 .cmd 里写了中文注释，
+  # 整批命令被解码成乱码直接报错。
+  windows-cmd-check:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    name: .cmd 必须纯 ASCII
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 检查 .cmd / .bat 没有非 ASCII 字节
+        run: python -c "import glob,sys;[print(f) or sys.exit(1) for f in glob.glob('**/*.cmd',recursive=True) if any(b>127 for b in open(f,'rb').read())]"

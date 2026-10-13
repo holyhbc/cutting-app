@@ -36,3 +36,20 @@ python tests/run_all.py -k 权限   # 只跑名字含「权限」的
 - 报工成功后自动跳 `GET /api/report` → 404
 - `/admin` 曾经完全没有鉴权
 - 未登录访问 `/report` 曾经显示「标签未同步」页
+
+## CI
+
+`.github/workflows/tests.yml` —— push 到 main 或提 PR 自动跑：
+
+- **三档 Python**（3.8 / 3.11 / 3.13），防止用��语法写代码只在本地跑
+- **compileall** 全量语法检查，防止漏掉的文件语法错被测试漏过
+- **`.cmd` 纯 ASCII 检查** —— 专门防「中文注释在 cmd.exe 里变乱码命令」那个坑
+
+CI 上**不装 pyodbc**（Linux 装它要编译，慢且容易因为系统包翻车），
+用 `tests/_bootstrap.py` 打桩。反正测试从不真正连库。
+
+Windows 和 Linux 都验证过能全绿：
+
+```bash
+python tests/run_all.py          # 94/94
+```

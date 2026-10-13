@@ -19,6 +19,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cutt"))
+import _bootstrap  # noqa: F401,E402
 import report as R          # noqa: E402
 
 
@@ -202,6 +203,15 @@ class TestConnStr(unittest.TestCase):
         self.assertIsInstance(R.default_conn_str(), str)
 
 
+def _has_openpyxl():
+    """openpyxl 是可选依赖，CI 上不一定有。"""
+    try:
+        import openpyxl          # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 class TestExcelExport(unittest.TestCase):
     """Excel 导出：openpyxl 优先，失败必须能退回 CSV。"""
 
@@ -218,7 +228,14 @@ class TestExcelExport(unittest.TestCase):
         ok, msg = R.export_rows_to_excel(
             self.path, "报表", ["工号", "件数"], [["A001", 10]])
         self.assertTrue(ok, msg)
-        self.assertTrue(os.path.exists(self.path))
+        if _has_openpyxl():
+            self.assertTrue(os.path.exists(self.path))
+            self.assertIn("xlsx", msg)
+        else:
+            # 没装 openpyxl 时应当如实退回 CSV 并说明原因，
+            # 而不是假装导出了 xlsx
+            self.assertIn("csv", msg.lower(), msg)
+            self.assertTrue(os.path.exists(self.path[:-5] + ".csv"))
 
     def test_Decimal能导出(self):
         """金额是 Decimal，直接写会出错。"""

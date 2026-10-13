@@ -20,9 +20,7 @@ import tempfile
 import threading
 import unittest
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "webapp"))
-sys.path.insert(0, os.path.join(ROOT, "cutt"))
+import _bootstrap  # noqa: F401  先打桩/设环境，再引入被测代码
 
 
 class ScanTestCase(unittest.TestCase):

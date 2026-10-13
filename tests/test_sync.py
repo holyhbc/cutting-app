@@ -13,6 +13,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "webapp"))
+import _bootstrap  # noqa: F401,E402
 import sync_reports as SR   # noqa: E402
 
 from base import FakeCursor   # noqa: E402
