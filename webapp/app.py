@@ -617,21 +617,24 @@ def page_admin(st, token):
             f'<p class="sub">这些是需要人工处理的事务</p></div>']
 
     # 需要处理的（红），只是统计的（普通）
+    # link 必须是真实存在的路由。以前这里写的是 "report"/"change" 这种
+    # 占位词，/admin/report 和 /admin/change 根本没注册，点进去必然 404。
+    # 改量类没��独立列表页，直接指向 /approve。
     need = [
-        ("failed", "同步失败", "report", "danger", f'{st["failed"]} 条报工写不进数据库'),
-        ("pending", "待同步", "report", "warn", f'{st["pending"]} 条等局域网同步器写回'),
-        ("change_pending", "待审批改量", "change", "warn",
+        ("failed", "同步失败", "/admin/failed", "danger", f'{st["failed"]} 条报工写不进数据库'),
+        ("pending", "待同步", "/admin/pending", "warn", f'{st["pending"]} 条等局域网同步器写回'),
+        ("change_pending", "待审批改量", "/approve", "warn",
          f'{st["change_pending"]} 条改量申请等你处理'),
-        ("change_unsynced", "待回写", "change", "warn",
+        ("change_unsynced", "待回写", "/approve?status=approved", "warn",
          f'{st["change_unsynced"]} 条已批准的改量还没写回数据库'),
     ]
     items = ""
-    for key, title, kind, tone, desc in need:
+    for key, title, link, tone, desc in need:
         n = st[key]
         mark = f'<span class="pill no">{n}</span>' if n else '<span class="pill ok">0</span>'
         color = "#c0392b" if (n and tone == "danger") else "#b26a00"
         items += (f'<a class="btn ghost" style="text-align:left;border-left:4px solid {color}" '
-                  f'href="/admin/{kind}?t={esc(token)}">'
+                  f'href="{esc(link)}?t={esc(token)}">'
                   f'<div style="display:flex;justify-content:space-between;align-items:center">'
                   f'<span style="font-weight:600;color:#1a73a8">{title}</span>{mark}</div>'
                   f'<div style="font-size:13px;color:#666">{desc}</div></a>')
@@ -1746,7 +1749,11 @@ class Handler(BaseHTTPRequestHandler):
         cells = "".join(f"<th>{esc(h)}</th>" for h in heads)
         tr_html = ""
         for cls, t in trs:
-            tds = "".join(f"<td>{esc(str(c))}</td>" for c in t)
+            # 最后一列是操作按钮（本来就�� HTML），不能再 esc ——
+            # 一转义就会把 <a> 当文字显示出来，表格看起来整个乱掉。
+            # 前面的数据列才需要转义防注入。
+            tds = "".join(f"<td>{esc(str(c))}</td>" for c in t[:-1])
+            tds += f'<td>{t[-1]}</td>'
             tr_html += f'<tr class="{cls}">{tds}</tr>'
         legend = ('<div class="legend">'
                   '<span><i style="background:#fff7e6"></i>待同步</span>'

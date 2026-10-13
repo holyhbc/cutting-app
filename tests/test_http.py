@@ -499,3 +499,87 @@ class TestChangeEntryPoints(HTTPTestCase):
         self.assertIn("直接生效", body)
         code2, body2 = self.get(f"/change?report_id={self.rid}", self.worker)
         self.assertIn("申请修改报工数量", body2)
+
+
+class TestNoDeadLinks(HTTPTestCase):
+    """回归：页面上的每个链接都必须有对应路由。
+
+    后台首页的「待处理」条目曾经指向 /admin/report 和 /admin/change，
+    这两个路由压根没注册，点进去就是 404。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.add_employee("C001", "测试主管")
+        self.sup = self.login("C001")
+
+    def test_后台待处理链接都能打开(self):
+        import re
+        code, body = self.get("/admin", self.sup)
+        self.assertEqual(code, 200)
+        links = set(re.findall(r'href="(/admin/[^"?]+|/approve[^"?]*)', body))
+        self.assertTrue(links, "后台首页应该有入口链接")
+        for lk in links:
+            sub = self.get(lk, self.sup)
+            self.assertNotEqual(sub[0], 404, f"{lk} 是死链")
+            self.assertNotEqual(sub[0], 500, f"{lk} 报错了")
+
+    def test_所有已注册路由(self):
+        import os
+        import re as _re
+        import _bootstrap
+        src = open(os.path.join(_bootstrap.ROOT, "webapp", "app.py"),
+                   encoding="utf-8").read()
+        routes = set(_re.findall(r'path == "([^"]+)"', src))
+        code, body = self.get("/admin", self.sup)
+        for lk in set(_re.findall(r'href="(/[^"?]+)', body)):
+            base = lk.rstrip("/") or "/"
+            if not (base in routes or any(r.startswith(base + "/")
+                                           for r in routes)):
+                self.fail(f"死链 {lk}，已注册路由：{sorted(routes)}")
+
+
+class TestMineTableNotBroken(HTTPTestCase):
+    """回归：操作列的 HTML 被 esc 掉，表格显示成一串 &lt;a&gt; 源码。"""
+
+    def setUp(self):
+        super().setUp()
+        self.add_employee("C002", "员工测试")
+        self.add_process("ZD1", 1, "打洞纽扣", 0.5)
+        self.add_bundle("ZD1", 1, 11, 100)
+        rid = self.db.create_report("S", "ZD1", 1, 11, 1, "打洞纽扣",
+                                    "C002", "员工测试", 100, 0.5)["id"]
+        self.db.get_conn().execute(
+            "UPDATE report SET status='synced', jfgzid=9001 WHERE id=?", (rid,))
+        self.db.get_conn().commit()
+        self.push_reports([(9001, "2026-10-12 10:00:00", "C002", "员工测试",
+                            "ZD1", 1, 1, 11, 100, 0.5, 50.0, 1)])
+        self.tok = self.login("C002")
+
+    def test_操作列是活的链接不是源码(self):
+        import re
+        code, body = self.get("/report/mine", self.tok)
+        self.assertEqual(code, 200)
+        self.assertNotIn("&lt;a href", body, "操作列的 HTML 被转义了")
+        self.assertNotIn("&lt;span", body, "操作列的 HTML 被转义了")
+        self.assertIn("/change?report_id=", body)
+
+    def test_行列数一致(self):
+        import re
+        code, body = self.get("/report/mine", self.tok)
+        nhead = len(re.findall(r"<th>", body))
+        for m in re.finditer(r'<tr class="r-\w+">(.*?)</tr>', body, re.S):
+            ncell = len(re.findall(r"<td", m.group(1)))
+            self.assertEqual(ncell, nhead, "表格列数不一致会错行")
+
+    def test_数据列仍然转义防注入(self):
+        """操作列免转义，但数据列必须转义。"""
+        self.db.get_conn().execute(
+            "INSERT OR REPLACE INTO ygzl VALUES (?,?,0)",("C002","员工测试"))
+        self.db.get_conn().commit()
+        self.push_reports([(9002, "2026-10-12 10:00:00", "C002",
+                            "<script>x</script>", "ZD<script>", 1, 1, 11, 5,
+                            0.5, 2.5, 1)])
+        code, body = self.get("/report/mine", self.tok)
+        self.assertNotIn("<script>x</script>", body, "数据列没转义，有注入风险")
+        self.assertIn("&lt;script&gt;", body)
