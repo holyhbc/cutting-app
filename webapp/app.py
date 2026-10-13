@@ -25,8 +25,15 @@ import html
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, quote as url_quote
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8",
-                              errors="replace", line_buffering=True)
+# 强制控制台用 UTF-8，否则 Windows 上中文输出会乱码。
+# 用 reconfigure 而不是包一层 TextIOWrapper：
+# 重新包会在 stdout 已被关闭/替换时抛
+# "ValueError: I/O operation on closed file"，把 import 直接搞崩。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, ValueError):
+    pass
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import db as D

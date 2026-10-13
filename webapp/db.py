@@ -36,6 +36,11 @@ def get_conn():
     return conn
 
 
+def _migrate_quiet():
+    """测试环境不刷 migrate 日志（每建一个库都打一行太吵）。"""
+    return os.environ.get("HBC_QUIET_MIGRATE") == "1"
+
+
 def _migrate(conn):
     """补齐历史库缺失的列。
 
@@ -68,14 +73,17 @@ def _migrate(conn):
                 continue
             try:
                 conn.execute(f"ALTER TABLE change_request ADD COLUMN {ddl}")
-                print(f"[migrate] change_request + {col}", flush=True)
+                if not _migrate_quiet():
+                    print(f"[migrate] change_request + {col}", flush=True)
             except Exception as e:
-                print(f"[migrate] change_request.{col} 失败: {e}", flush=True)
+                if not _migrate_quiet():
+                    print(f"[migrate] change_request.{col} 失败: {e}", flush=True)
 
     if not cols("sync_meta"):
         conn.execute("CREATE TABLE IF NOT EXISTS sync_meta "
                      "(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        print("[migrate] 新建 sync_meta", flush=True)
+        if not _migrate_quiet():
+            print("[migrate] 新建 sync_meta", flush=True)
 
 
 def init_db():
@@ -750,7 +758,7 @@ def report_mine(dfrom, dto, ygno, limit=100):
     # jfdj 里压根没有对应工序，显示"—"是如实反映。
     # 颜色从 bundle 表关联（同一定单一扎只有一个颜色，bundle 主键含 yn）。
     hist = [dict(r) for r in get_conn().execute(
-        "SELECT r.gzdate, r.zdno, r.gx, r.cc, r.zh, r.js, r.je, "
+        "SELECT r.gzdate, r.ygno, r.zdno, r.gx, r.cc, r.zh, r.js, r.je, "
         "       COALESCE(p.gxname,'') gxname, "
         "       COALESCE(b.yn,'') yn, 'synced' src "
         "FROM jfgz_report r "
@@ -761,7 +769,7 @@ def report_mine(dfrom, dto, ygno, limit=100):
         "ORDER BY r.gzdate DESC, r.jfgzid DESC LIMIT ?",
         (ygno, dfrom, dto, int(limit))).fetchall()]
     local = [dict(r) for r in get_conn().execute(
-        "SELECT r.gzdate, r.zdno, r.gx, r.cc, r.zh, r.js, r.je, "
+        "SELECT r.gzdate, r.ygno, r.zdno, r.gx, r.cc, r.zh, r.js, r.je, "
         "       COALESCE(NULLIF(r.gxname,''),(SELECT p.gxname FROM process p "
         "                    WHERE p.zdno=r.zdno AND p.gx=r.gx)) gxname, "
         "       COALESCE((SELECT MIN(yn) FROM bundle b "
