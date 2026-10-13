@@ -481,3 +481,91 @@ class TestSupervisorEdit(ScanTestCase):
                                             supervisor=True)
         self.assertEqual(ctx.exception.code, "not_synced")
         self.assertIn("作废", ctx.exception.message)
+
+
+class TestSchemaDrivenMigration(ScanTestCase):
+    """回归：迁移必须由 schema.sql 驱动，不能手写列清单。
+
+    手写清单会随表结构改动悄悄过期 —— 线上就因此漏了
+    jfgzid/gx/gxname/zdno/cc/zh 六个列，主管代改时炸
+    "table change_request has no column named gx"。
+    已连踩两次，所以改成从 schema.sql 解析。
+    """
+
+    def test_解析出所有表的列(self):
+        cols = self.db._schema_columns()
+        self.assertIn("change_request", cols)
+        self.assertIn("report", cols)
+        names = [n for n, _ in cols["change_request"]]
+        for need in ("id", "report_id", "jfgzid", "ygno", "gx", "gxname",
+                     "zdno", "cc", "zh", "old_num", "new_num",
+                     "reason", "status", "approve_gh", "created_at", "synced"):
+            self.assertIn(need, names, f"没解析出 {need}")
+
+    def test_旧表自动补齐到schema(self):
+        import sqlite3
+        conn = self.db.get_conn()
+        self.db.get_conn().close()
+        self.db._local.__dict__.pop("conn", None)
+        raw = sqlite3.connect(self.db_path)
+        raw.execute("DROP TABLE change_request")
+        # 复刻线上那版：只有阶段1的四个字段
+        raw.execute("""CREATE TABLE change_request (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, report_id INTEGER NOT NULL,
+            new_num INTEGER NOT NULL, created_at TEXT)""")
+        raw.execute("INSERT INTO change_request (report_id,new_num,created_at)"
+                    " VALUES (999,50,'2026-10-10')")   # 用不存在的 report_id
+        raw.commit()
+        raw.close()
+
+        self.db.init_db()
+        have = {r[1] for r in self.db.get_conn().execute(
+            "PRAGMA table_info(change_request)")}
+        want = {n for n, _ in self.db._schema_columns()["change_request"]}
+        self.assertEqual(want - have, set(), "仍有列没补上")
+        # 历史数据必须还在
+        row = self.db.get_conn().execute(
+            "SELECT report_id,new_num,created_at FROM change_request").fetchone()
+        self.assertEqual(tuple(row), (999, 50, "2026-10-10"))
+
+    def test_迁移后能正常写入新列(self):
+        """这才是真正要防的：迁移补齐后，代码的 INSERT 要能跑通。"""
+        conn = self.db.get_conn()
+        conn.execute("DROP TABLE change_request")
+        conn.execute("""CREATE TABLE change_request (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, report_id INTEGER NOT NULL,
+            new_num INTEGER NOT NULL, created_at TEXT)""")
+        conn.execute("INSERT INTO change_request (report_id,new_num,created_at)"
+                    " VALUES (999,50,'2026-10-10')")
+        conn.commit()
+        conn.close()
+        self.db._local.__dict__.pop("conn", None)
+        self.db.init_db()
+
+        self.add_process("ZD1", 1, "打洞纽扣", 0.5)
+        self.add_bundle("ZD1", 1, 11, 100)
+        rid = self.db.create_report("S", "ZD1", 1, 11, 1, "打洞纽扣",
+                                    "C002", "员工测试", 40, 0.5)["id"]
+        self.db.get_conn().execute(
+            "UPDATE report SET status='synced', jfgzid=1 WHERE id=?", (rid,))
+        self.db.get_conn().commit()
+        # 这里以前就是 "no such column named gx" 的现场
+        cid = self.db.create_change(rid, "C002", "员工测试", 35, "少裁了")
+        self.assertTrue(cid)
+
+    def test_主管代改写入全部列(self):
+        self.add_employee("C001", "主管")
+        self.add_process("ZD1", 1, "打洞纽扣", 0.5)
+        self.add_bundle("ZD1", 1, 11, 100)
+        rid = self.db.create_report("S", "ZD1", 1, 11, 1, "打洞纽扣",
+                                    "C002", "工人", 40, 0.5)["id"]
+        self.db.get_conn().execute(
+            "UPDATE report SET status='synced', jfgzid=7 WHERE id=?", (rid,))
+        self.db.get_conn().commit()
+        cid = self.db.create_change(rid, "C002", "工人", 30, "调整",
+                                    approved_by="C001", note="调整")
+        r = next(x for x in self.db.list_changes(status=None, ygno="C002")
+                 if x["id"] == cid)
+        self.assertEqual(r["gx"], 1)
+        self.assertEqual(r["zdno"], "ZD1")
+        self.assertEqual(r["status"], "approved")

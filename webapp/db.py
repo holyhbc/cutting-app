@@ -8,6 +8,7 @@
 - D-004 gzdate 存完整日期时间
 """
 import os
+import re
 import sqlite3
 import threading
 from datetime import datetime, timedelta
@@ -41,49 +42,89 @@ def _migrate_quiet():
     return os.environ.get("HBC_QUIET_MIGRATE") == "1"
 
 
+def _schema_columns():
+    """从 schema.sql 里解析出「表 -> [(列名, 列定义)]」。
+
+    迁移必须由 schema.sql 驱动，不能手写列清单 ——
+    手写的清单会随表结构改动而悄悄过期，
+    结果就是线上又报 "no such column: xxx"。踩过两次了。
+    """
+    import re
+    try:
+        with open(SCHEMA, "r", encoding="utf-8") as f:
+            sql = f.read()
+    except Exception:
+        return {}
+    out = {}
+    for m in re.finditer(
+            r"CREATE TABLE IF NOT EXISTS (\w+)\s*\((.*?)\n\);", sql, re.S):
+        table, body = m.group(1), m.group(2)
+        cols = []
+        for line in body.splitlines():
+            # 先去掉行尾注释（schema.sql 里列定义后面常跟说明），
+            # 再去尾逗号，否则 DEFAULT 'pending', -- xxx 会把注释
+            # 一起当成列定义带进 ALTER TABLE，直接语法错。
+            line = line.split("--")[0].strip().rstrip(",").strip()
+            if not line:
+                continue
+            name = line.split()[0]
+            if not re.match(r"^[A-Za-z_]\w*$", name):
+                continue
+            if name.upper() in ("PRIMARY", "UNIQUE", "FOREIGN", "CHECK",
+                                "CONSTRAINT"):
+                continue
+            cols.append((name, line))
+        if cols:
+            out[table] = cols
+    return out
+
+
 def _migrate(conn):
-    """补齐历史库缺失的列。
+    """把历史库补齐到 schema.sql 声明的结构。
 
-    schema.sql 全是 CREATE TABLE IF NOT EXISTS ——
-    对已经存在的旧表，它**不会**补任何列。
-    阶段3 给 change_request 加了 ygno/old_num/... 等字段，
-    但线上库是阶段1建的旧表，字段缺失，
-    一查就报 "no such column: ygno"（500）。
+    schema.sql 全是 CREATE TABLE IF NOT EXISTS —— 对已存在的旧表
+    它一个列都不会补。旧库缺列会直接抛 "no such column: xxx"（500）。
 
-    这里做幂等迁移：缺哪个补哪个，已存在就跳过。
+    做法：以 schema.sql 为准，缺的列一律补上。已存在的跳过，幂等。
     """
     def cols(table):
         return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
 
-    have = cols("change_request")
-    if have:                        # 表不存在说明是全新库，交给 schema.sql
-        for ddl in ("ygno TEXT NOT NULL DEFAULT ''",
-                    "ygname TEXT NOT NULL DEFAULT ''",
-                    "old_num INTEGER NOT NULL DEFAULT 0",
-                    "new_num INTEGER NOT NULL DEFAULT 0",
-                    "reason TEXT NOT NULL DEFAULT ''",
-                    "status TEXT NOT NULL DEFAULT 'pending'",
-                    "created_at TEXT NOT NULL DEFAULT ''",
-                    "approve_gh TEXT",
-                    "approve_note TEXT",
-                    "approve_at TEXT",
-                    "synced INTEGER NOT NULL DEFAULT 0"):
-            col = ddl.split()[0]
-            if col in have:
+    for table, decls in _schema_columns().items():
+        have = cols(table)
+        if not have:
+            continue                      # 表不存在，交给 schema.sql 建
+        for name, ddl in decls:
+            if name in have:
                 continue
+            # ALTER TABLE ADD COLUMN 的限制比 CREATE TABLE 严：
+            #  · 带 PRIMARY KEY / UNIQUE 的列定义带过去必然语法错
+            #  · NOT NULL 且没有 DEFAULT 时，SQLite 会因为存量行
+            #    没有值而直接拒绝（报错文案还不一定指向 ALTER）
+            # 所以这里剥掉键约束，并给无默认值的 NOT NULL 补一个默认值。
+            d = re.sub(r"\s+CONSTRAINT\s+\S+\s+PRIMARY\s+KEY[^,]*", "", ddl,
+                       flags=re.I)
+            d = re.sub(r"\s+PRIMARY\s+KEY[^,]*", "", d, flags=re.I)
+            d = re.sub(r"\s+UNIQUE[^,]*", "", d, flags=re.I)
+            has_default = re.search(r"\bDEFAULT\b", d, re.I) is not None
+            if re.search(r"\bNOT\s+NULL\b", d, re.I) and not has_default:
+                # 按类型给一个安全的空值
+                if re.match(r"^[\w]+\s+(TEXT|REAL|FLOAT|DOUBLE)", d, re.I):
+                    d = d[:len("NOT NULL")] + "DEFAULT ''"
+                elif re.search(r"\bINTEGER\b", d, re.I):
+                    d = d[:len("NOT NULL")] + "DEFAULT 0"
+                else:
+                    d = d[:len("NOT NULL")] + "DEFAULT NULL"
+            d = re.sub(r"\bNOT\s+NULL\b", "", d, flags=re.I)
+            d = d.replace("  ", " ").strip()
             try:
-                conn.execute(f"ALTER TABLE change_request ADD COLUMN {ddl}")
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {d}")
                 if not _migrate_quiet():
-                    print(f"[migrate] change_request + {col}", flush=True)
+                    print(f"[migrate] {table} + {name}", flush=True)
             except Exception as e:
                 if not _migrate_quiet():
-                    print(f"[migrate] change_request.{col} 失败: {e}", flush=True)
-
-    if not cols("sync_meta"):
-        conn.execute("CREATE TABLE IF NOT EXISTS sync_meta "
-                     "(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        if not _migrate_quiet():
-            print("[migrate] 新建 sync_meta", flush=True)
+                    print(f"[migrate] {table}.{name} 失败: {e}", flush=True)
+    conn.commit()
 
 
 def init_db():
