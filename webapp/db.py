@@ -79,13 +79,93 @@ def _schema_columns():
     return out
 
 
+def _relax_notnull_defaults(conn, table, decls=()):
+    """把「NOT NULL 且没有默认值」的历史遗留列改成可空。
+
+    背景：change_request 最早建表时用的列名是 new_js（NOT NULL 无默认值），
+    后来 schema.sql 改用 new_num，迁移把 new_num 补上了，
+    但遗留的 new_js 还留在表里 —— 而它 NOT NULL 又没默认值，
+    代码 INSERT 不写它，于是每次插入都报
+    "NOT NULL constraint failed: change_request.new_js"。
+
+    SQLite 不能直接改列约束，只能重建表。这里：
+      1. 先把数据备份到 <table>_legacy_backup（只留一份）
+      2. 用「去掉 NOT NULL」的等价结构重建表
+      3. 数据原样搬过去，不丢
+
+    只处理 NOT NULL 且 DEFAULT 为空的列 —— 带默认值的没问题，
+    主键（report_id NOT NULL）也保留，因为业务上必须给。
+    """
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    declared = {n for n, _ in decls}
+    # 只处理「schema.sql 里没声明」的列 —— 那才是历史遗留。
+    # schema.sql 自己声明的 NOT NULL 列是有意为之，别动它
+    # （report_id 之类，改了反而会削弱约束）。
+    bad = [r for r in rows if r[3] == 1 and r[4] is None and r[5] == 0
+           and r[1] not in ("id",) and r[1] not in declared]
+    if not bad:
+        return
+    bad_names = {r[1] for r in bad}
+    bk = f"{table}_legacy_backup"
+    if not cols_of(conn, bk):
+        cols = ", ".join(f'"{r[1]}"' for r in rows)
+        ddl = _table_ddl_from_pragmas(rows)
+        conn.execute(f"CREATE TABLE IF NOT EXISTS {bk} ({ddl})")
+        conn.execute(f"INSERT INTO {bk} ({cols}) SELECT {cols} FROM {table}")
+        if not _migrate_quiet():
+            print(f"[migrate] 已备份 {table} -> {bk}", flush=True)
+    defs = []
+    for r in rows:
+        t = r[2] or "TEXT"
+        name = r[1]
+        col = f'"{name}" {t}'
+        if r[5]:
+            col += (" PRIMARY KEY AUTOINCREMENT"
+                    if t.upper() == "INTEGER" and name == "id" else " PRIMARY KEY")
+        elif name in bad_names:
+            # 这才是要放宽的遗留列
+            col = f'"{name}" {t}'
+        elif r[3] == 1:
+            # 其余 NOT NULL 列原样保留 —— 放宽它们会削弱约束
+            col += f" NOT NULL"
+            if r[4] is not None:
+                col += f" DEFAULT {r[4]}"
+        elif r[4] is not None:
+            col += f" DEFAULT {r[4]}"
+        defs.append(col)
+    new_ddl = (f'CREATE TABLE {table}_new (' + ", ".join(defs) + ")")
+    cols = ", ".join(f'"{r[1]}"' for r in rows)
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute(new_ddl)
+    conn.execute(f"INSERT INTO {table}_new ({cols}) SELECT {cols} FROM {table}")
+    conn.execute(f"DROP TABLE {table}")
+    conn.execute(f"ALTER TABLE {table}_new RENAME TO {table}")
+    conn.execute("PRAGMA foreign_keys=ON")
+    if not _migrate_quiet():
+        print(f"[migrate] {table} 放宽 NOT NULL: "
+              + ", ".join(r[1] for r in bad), flush=True)
+
+
+def cols_of(conn, table):
+    return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _table_ddl_from_pragmas(rows):
+    out = []
+    for r in rows:
+        out.append(f'"{r[1]}" {r[2] or "TEXT"}')
+    return ", ".join(out)
+
+
 def _migrate(conn):
     """把历史库补齐到 schema.sql 声明的结构。
 
     schema.sql 全是 CREATE TABLE IF NOT EXISTS —— 对已存在的旧表
     它一个列都不会补。旧库缺列会直接抛 "no such column: xxx"（500）。
 
-    做法：以 schema.sql 为准，缺的列一律补上。已存在的跳过，幂等。
+    做法：
+      1. 以 schema.sql 为准，缺的列一律补上（已存在的跳过，幂等）
+      2. 顺手放宽历史遗留列的 NOT NULL —— 它们会让后续 INSERT 莫名失败
     """
     def cols(table):
         return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
@@ -124,6 +204,12 @@ def _migrate(conn):
             except Exception as e:
                 if not _migrate_quiet():
                     print(f"[migrate] {table}.{name} 失败: {e}", flush=True)
+        # 列补齐后再放宽历史遗留列的 NOT NULL
+        try:
+            _relax_notnull_defaults(conn, table, decls)
+        except Exception as e:
+            if not _migrate_quiet():
+                print(f"[migrate] {table} 放宽 NOT NULL 失败: {e}", flush=True)
     conn.commit()
 
 

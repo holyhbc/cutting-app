@@ -569,3 +569,97 @@ class TestSchemaDrivenMigration(ScanTestCase):
         self.assertEqual(r["gx"], 1)
         self.assertEqual(r["zdno"], "ZD1")
         self.assertEqual(r["status"], "approved")
+
+
+class TestLegacyColumnMigration(ScanTestCase):
+    """回归：历史遗留列 new_js 让主管代改一直报 NOT NULL 失败。
+
+    change_request 最早建表用 new_js（NOT NULL 无默认值），
+    后来 schema.sql 改成 new_num，迁移补上了 new_num，
+    但 new_js 留在表里 —— 代码不写它，
+    而它 NOT NULL 又没默认值，于是每次插入都炸。
+
+    线上报错原文：
+      NOT NULL constraint failed: change_request.new_js
+    """
+
+    def _make_legacy(self):
+        conn = self.db.get_conn()
+        conn.execute("DROP TABLE change_request")
+        conn.execute("""CREATE TABLE change_request (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            report_id   INTEGER NOT NULL,
+            jfgzid      INTEGER,
+            new_js      INTEGER NOT NULL,
+            reason      TEXT    NOT NULL DEFAULT '',
+            status      TEXT    NOT NULL DEFAULT 'pending',
+            created_at  TEXT    NOT NULL,
+            approve_at  TEXT,
+            approve_gh  TEXT)""")
+        conn.execute("INSERT INTO change_request (report_id,new_js,created_at,status)"
+                     " VALUES (555,50,'2026-10-01','pending')")
+        conn.commit()
+        conn.close()
+        self.db._local.__dict__.pop("conn", None)
+        self.db.init_db()
+        return {r[1]: (r[3], r[4]) for r in self.db.get_conn().execute(
+            "PRAGMA table_info(change_request)")}
+
+    def test_遗留列被放宽(self):
+        info = self._make_legacy()
+        self.assertEqual(info["new_js"][0], 0,
+                         "new_js 必须放宽，否则 INSERT 永远失败")
+
+    def test_正常列的约束不被削弱(self):
+        info = self._make_legacy()
+        for col in ("report_id", "created_at", "status", "reason"):
+            self.assertEqual(info[col][0], 1,
+                             f"{col} 的 NOT NULL 不该被改弱")
+        self.assertEqual(info["status"][1], "'pending'")
+
+    def test_历史数据不丢(self):
+        self._make_legacy()
+        row = self.db.get_conn().execute(
+            "SELECT report_id,new_js,created_at FROM change_request").fetchone()
+        self.assertEqual(tuple(row), (555, 50, "2026-10-01"))
+
+    def test_有备份表可回退(self):
+        self._make_legacy()
+        names = [r[0] for r in self.db.get_conn().execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name LIKE '%legacy_backup%'")]
+        self.assertIn("change_request_legacy_backup", names,
+                      "重建前必须留备份，否则出问题无法回退")
+
+    def test_只备份真正需要处理的表(self):
+        """不该把所有表都重建一遍 —— 正常表的约束不能被动。"""
+        self._make_legacy()
+        names = [r[0] for r in self.db.get_conn().execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name LIKE '%legacy_backup%'")]
+        self.assertEqual(names, ["change_request_legacy_backup"])
+
+    def test_迁移后主管代改能写入(self):
+        """这就是线上炸的那一步。"""
+        self._make_legacy()
+        self.add_process("ZD1", 1, "打洞纽扣", 0.5)
+        self.add_bundle("ZD1", 1, 11, 100)
+        rid = self.db.create_report("S", "ZD1", 1, 11, 1, "打洞纽扣",
+                                    "C002", "工人", 40, 0.5)["id"]
+        self.db.get_conn().execute(
+            "UPDATE report SET status='synced', jfgzid=7 WHERE id=?", (rid,))
+        self.db.get_conn().commit()
+        cid = self.db.create_change(rid, "C002", "工人", 30, "调整",
+                                    approved_by="C001", note="调整")
+        self.assertTrue(cid)
+
+    def test_迁移后工人申请也能写入(self):
+        self._make_legacy()
+        self.add_process("ZD1", 1, "打洞纽扣", 0.5)
+        self.add_bundle("ZD1", 1, 11, 100)
+        rid = self.db.create_report("S", "ZD1", 1, 11, 1, "打洞纽扣",
+                                    "C002", "工人", 40, 0.5)["id"]
+        self.db.get_conn().execute(
+            "UPDATE report SET status='synced', jfgzid=7 WHERE id=?", (rid,))
+        self.db.get_conn().commit()
+        self.assertTrue(self.db.create_change(rid, "C002", "工人", 30, "申请"))
