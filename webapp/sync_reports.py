@@ -280,6 +280,16 @@ def main():
 
     items = data.get("reports") or []
 
+    # 连接必须在处理改量**之前**建立。
+    # 之前放在改量循环之后，改量分支里的 cur/conn 全是未赋值的局部变量，
+    # 线上表现是 UnboundLocalError：cannot access local variable 'cur'，
+    # 改量一条都写不进去 —— 单测用 FakeCursor 直接调函数，没暴露这个顺序问题。
+    conn = connect(args.target)
+    cur = conn.cursor()
+    results = []
+    results_chg = []
+    ok_n = fail_n = dup_n = 0
+
     # ---- 改量审批：先处理已通过但未同步的 ----
     try:
         chg = vps_get(args.server, "/api/changes?status=approved", args.token)
@@ -324,13 +334,8 @@ def main():
     if not items:
         if not changes:
             print("没有待同步的报工。")
+        conn.close()
         return 0
-
-    conn = connect(args.target)
-    cur = conn.cursor()
-    results = []
-    results_chg = []
-    ok_n = fail_n = dup_n = 0
 
     for rec in items:
         rid = rec["id"]

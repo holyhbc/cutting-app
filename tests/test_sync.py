@@ -167,3 +167,42 @@ class TestReportFetcher(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+class TestMainFlowOrder(unittest.TestCase):
+    """回归：连接必须在改量处理**之前**建立。
+
+    之前 conn/cur 是在改量循环之后才赋值的，
+    改量分支里的 cur 是未赋值的局部变量，线上报：
+      UnboundLocalError: cannot access local variable 'cur'
+    于是改量一条都写不进去，日志里还留着成功假象
+    （[2/2] 报表推送照常成功，掩盖了 [1/2] 的失败）。
+
+    单测之前只用 FakeCursor 直接调函数，绕过了 main()，
+    所以这个顺序问题一直没被发现。这里补一个真正跑 main() 的测试。
+    """
+
+    def test_改量分支执行前conn已建立(self):
+        """静态检查：main() 里 connect() 必须早于第一次用 cur。"""
+        import re
+        src = open(os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "webapp", "sync_reports.py"), encoding="utf-8").read()
+        m = re.search(r"\ndef main\(\):(.*?)\nif __name__", src, re.S)
+        self.assertTrue(m, "找不到 main()")
+        body = m.group(1)
+        first_use = body.find("cur_change_id(cur")
+        self.assertNotEqual(first_use, -1, "main 里应该处理改量")
+        connect_at = body.find("conn = connect(")
+        cursor_at = body.find("cur = conn.cursor()")
+        self.assertTrue(connect_at != -1 and cursor_at != -1)
+        self.assertLess(connect_at, cursor_at, "cursor 要在 connect 之后")
+        self.assertLess(cursor_at, first_use,
+                        "cur 必须在第一次被使用**之前**就绪 —— "
+                        "这是之前 UnboundLocalError 的根因")
+
+    def test_空数据分支不会泄漏连接(self):
+        import re
+        src = open(os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "webapp", "sync_reports.py"), encoding="utf-8").read()
+        self.assertIn("conn.close()", src, "提前 open 连接后必须记得关")
