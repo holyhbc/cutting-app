@@ -76,6 +76,11 @@ label{display:block;font-size:14px;color:#666;margin:14px 0 6px}
 input{width:100%;padding:12px;font-size:17px;border:1px solid #ddd;border-radius:10px;
       background:#fafafa}
 input:focus{outline:0;border-color:#0a84ff;background:#fff}
+/* select 跟 input 一样拉满宽：下拉框默认宽度只有一行文字那么点，
+   手机上根本点不准；字号不齐看着也跟其它输入框不像一家人。 */
+select{width:100%;padding:12px;font-size:17px;border:1px solid #ddd;
+       border-radius:10px;background:#fafafa;box-sizing:border-box}
+select:focus{outline:0;border-color:#0a84ff;background:#fff}
 button{width:100%;padding:14px;font-size:17px;font-weight:600;border:0;border-radius:12px;
        background:#0a84ff;color:#fff;margin-top:16px}
 button:disabled{background:#ccc}
@@ -1665,8 +1670,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._redirect_login()
         dfrom = self._q("from", _today_minus(30)) or _today_minus(30)
         dto = self._q("to", _today()) or _today()
-        rows = D.report_mine(dfrom, dto, me["ygno"], 300)
-        summ = D.report_mine_summary(dfrom, dto, me["ygno"])
         # 手机屏幕窄：状态不占一列，改用整行底色表示；
         # gx 编号已被工序名称取代，那一列换成颜色（工人真正关心认哪件衣服）。
         RC = {"synced": "r-sync", "pending": "r-wait", "failed": "r-fail"}
@@ -1696,6 +1699,11 @@ class Handler(BaseHTTPRequestHandler):
                 if r["chg"] == "pending":
                     status = ('<span style="font-size:11px;color:#b26a00">'
                               f'改量审批中（原 {r.get("js_old")}）</span>')
+                elif r.get("chg_done"):
+                    # 已经写回 jfgz 了，synced=1。再写「等同步」只会让主管
+                    # 每次打开都以为同步没生效。
+                    status = ('<span style="font-size:11px;color:#1a7f3d">'
+                              f'已改量（原 {r.get("js_old")}），已同步</span>')
                 else:
                     status = ('<span style="font-size:11px;color:#1a73a8">'
                               f'已改量（原 {r.get("js_old")}）'
@@ -1703,8 +1711,8 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 status = ""
             act = ""
-            if r.get("chg"):
-                # 已在改量流程中，别再给入口（重复申请会被后端拒）
+            if r.get("chg") and not r.get("chg_done"):
+                # 还在改量流程中，别再给入口（重复申请会被后端拒）
                 act = '<span style="font-size:11px;color:#999">改量中</span>'
             elif r.get("id"):
                 lbl = "主管改量" if is_sup_here else "申请改量"
@@ -1720,14 +1728,33 @@ class Handler(BaseHTTPRequestHandler):
                else f'{esc(view_ygno)} 的报工')
         picker = ""
         if is_sup_here:
+            workers = D.list_report_workers()
+            # 当前看的人不在列表里（比如列表截断、或他只报过历史工），
+            # 得把他补进去 —— 否则下拉框会静默显示成列表里的另一个人。
+            if not any(w["ygno"] == view_ygno for w in workers):
+                workers = ([{"ygno": view_ygno,
+                             "ygname": me["ygname"] if view_ygno == me["ygno"] else ""}]
+                           + workers)
+            # selected 必须给：不给的话浏览器一律高亮第一项，
+            # 收起状态下框里显示的是工号最小的那个，跟下面表格查的人对不上。
             opts = "".join(
-                f'<option value="{esc(y)}">'
-                f'{"✓ " if y == view_ygno else ""}{esc(y)}</option>'
-                for y in D.list_report_workers())
-            picker = ('<p class="sub" style="margin-top:10px">看谁的报工（可代改）</p>'
-                      '<select style="width:100%" onchange="location.href='
-                      "'/report/mine?t=" + esc(tok) + "&ygno='+this.value\">"
-                      + opts + '</select>')
+                f'<option value="{esc(w["ygno"])}"'
+                f'{" selected" if w["ygno"] == view_ygno else ""}>'
+                f'{esc(w["ygno"] + (" " + w["ygname"] if w.get("ygname") else ""))}'
+                f'</option>'
+                for w in workers)
+            # 做成真正的表单并带上 from/to：换个人不该把刚选的时间段弄丢。
+            # onchange 用 this.form.submit()，别把 token 拼进 JS 字符串里。
+            picker = ('<form method="GET" action="/report/mine" style="margin-top:10px">'
+                      f'<input type="hidden" name="t" value="{esc(tok)}">'
+                      f'<input type="hidden" name="from" value="{esc(dfrom)}">'
+                      f'<input type="hidden" name="to" value="{esc(dto)}">'
+                      '<p class="sub" style="margin:10px 0 4px">'
+                      '看谁的报工（可代改）</p>'
+                      '<select name="ygno" onchange="this.form.submit()">'
+                      + opts + '</select>'
+                      '<button type="submit" class="ghost" style="margin-top:8px">'
+                      '看这个人</button></form>')
         head = (f'<div class="card"><h1>👤 '
                 f'{"主管代改" if is_sup_here else "我的报工"}</h1>'
                 f'<p class="sub">{who}　{dfrom} ~ {dto}</p>'

@@ -697,7 +697,7 @@ class TestChangeVisibleAtOnce(HTTPTestCase):
         import re
         row = re.search(r'<tr class="r-sync">(.*?)</tr>', body, re.S).group(1)
         tds = [re.sub("<[^>]+>", "", t).strip()
-               for t in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)]
+for t in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)]
         self.assertIn("11", tds, f"件数应显示新值，实际 {tds}")
 
     def test_改量中不再给申请入口(self):
@@ -706,3 +706,79 @@ class TestChangeVisibleAtOnce(HTTPTestCase):
         self.assertIn("改量审批中", body)
         self.assertNotIn(f"/change?report_id={self.rid}", body,
                          "已在改量流程中就不该再给入口")
+
+    def test_同步之后不再显示等同步(self):
+        """线上症状：后台已经同步过一次了，列表还是「已改量（原 20），等同步」
+        加「改量中」，主管每次点开都以为同步没生效。
+        """
+        cid = self.db.create_change(self.rid, "C002", "员工测试", 11, "多扫",
+                                    approved_by="C001")
+        self.db.mark_change_synced(cid, True)
+        code, body = self.get("/report/mine", self.worker)
+        self.assertEqual(code, 200)
+        self.assertIn("已同步", body, "已回写的改量要显示为已同步")
+        self.assertNotIn("等同步", body, "同步过了还提示等同步")
+        self.assertNotIn("改量中", body, "同步过了还说改量中")
+
+    def test_同步之后恢复申请入口(self):
+        """改量彻底办完，这条报工就该能再改了。"""
+        cid = self.db.create_change(self.rid, "C002", "员工测试", 11, "多扫",
+                                    approved_by="C001")
+        self.db.mark_change_synced(cid, True)
+        code, body = self.get("/report/mine", self.worker)
+        self.assertIn(f"/change?report_id={self.rid}", body,
+                      "同步完了就不该再锁死")
+
+
+class TestWorkerPicker(HTTPTestCase):
+    """主管选人下拉：带姓名，且收起状态要显示当前选中的那个人。
+
+    没有 selected 属性时浏览器一律高亮第一个 option，
+    框里显示的是工号最小的那个，跟下面表格里查的人对不上 ——
+    主管只能把下拉拉开看到打钩才知道现在看的是谁。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.add_employee("C001", "测试主管")
+        self.add_employee("C002", "阿珍")
+        self.add_employee("C003", "阿强")
+        self.add_process("ZD1", 2, "四针六线裤", 0.77)
+        self.add_bundle("ZD1", 1, 10, 100)
+        for ygno, name in (("C002", "阿珍"), ("C003", "阿强")):
+            self.db.create_report("S", "ZD1", 1, 10, 2, "四针六线裤",
+                                  ygno, name, 20, 0.77)
+        self.sup = self.login("C001")
+
+    def _selected(self, body):
+        import re
+        m = re.findall(r'<option value="([^"]*)" selected>([^<]*)</option>', body)
+        return m
+
+    def test_当前看的人被选中(self):
+        code, body = self.get("/report/mine?ygno=C003", self.sup)
+        sel = self._selected(body)
+        self.assertEqual(len(sel), 1, f"有且只有一个选中项，实际 {sel}")
+        self.assertEqual(sel[0][0], "C003",
+                         "收起状态必须显示正在看的那个人，不是列表第一个")
+
+    def test_选项带姓名(self):
+        code, body = self.get("/report/mine?ygno=C002", self.sup)
+        self.assertIn("C002 阿珍", body, "光有工号认不出人")
+        self.assertIn("C003 阿强", body)
+
+    def test_默认看自己时也选中自己(self):
+        code, body = self.get("/report/mine", self.sup)
+        sel = self._selected(body)
+        self.assertEqual(len(sel), 1)
+        self.assertEqual(sel[0][0], "C001")
+
+    def test_切换人选保留时间段(self):
+        code, body = self.get(
+            "/report/mine?ygno=C002&from=2026-10-01&to=2026-10-13", self.sup)
+        self.assertIn('name="from" value="2026-10-01"', body)
+        self.assertIn('name="to" value="2026-10-13"', body)
+
+    def test_工人看不到这个下拉(self):
+        code, body = self.get("/report/mine", self.login("C002"))
+        self.assertNotIn("<select", body)

@@ -733,7 +733,7 @@ class TestChangeOverlay(ScanTestCase):
         self.assertEqual(r["js"], 20, "被驳回的改量不该生效")
         self.assertIsNone(r.get("chg"))
 
-    def test_其他人的改量不影响(self):
+def test_其他人的改量不影响(self):
         rid2 = self.db.create_report("S2", "ZD1", 1, 10, 2, "四针六线裤",
                                      "C003", "丙", 30, 0.77)["id"]
         self.db.get_conn().execute(
@@ -742,3 +742,115 @@ class TestChangeOverlay(ScanTestCase):
         self.db.create_change(rid2, "C003", "丙", 5, "改", approved_by="C001")
         r = self._mine()[0]
         self.assertEqual(r["js"], 20, "别人的改量不该叠到别人身上")
+
+
+class TestListReportWorkers(ScanTestCase):
+    """主管选人下拉要带姓名，而且要选中当前看的那个人。"""
+
+    def setUp(self):
+        super().setUp()
+        self.add_employee("C001", "主管")
+        self.add_employee("C002", "工人乙")
+        self.add_employee("C003", "工人丙")
+        self.add_process("ZD1", 2, "四针六线裤", 0.77)
+        self.add_bundle("ZD1", 1, 10, 100)
+        for ygno, name, js in (("C002", "工人乙", 20), ("C003", "工人丙", 30)):
+            self.db.create_report("S", "ZD1", 1, 10, 2, "四针六线裤",
+                                  ygno, name, js, 0.77)
+
+    def test_带姓名返回(self):
+        got = {w["ygno"]: w["ygname"] for w in self.db.list_report_workers()}
+        self.assertEqual(got.get("C002"), "工人乙",
+                         "只给工号的话主管根本认不出谁是谁")
+
+    def test_ygzl兜底(self):
+        """报工记录里没名字（老数据）时退回花名册。"""
+        self.db.get_conn().execute("UPDATE report SET ygname=''")
+        self.db.get_conn().commit()
+        got = {w["ygno"]: w["ygname"] for w in self.db.list_report_workers()}
+        self.assertEqual(got.get("C003"), "工人丙")
+
+
+class TestChangeSynced(ScanTestCase):
+    """回归：同步任务跑完之后，页面不能再写「等同步 / 改量中」。
+
+    线上症状：主管改完数量，后台已经同步过一次了，
+    列表还是「已改量（原 20），等同步」+「改量中」。
+    根因是叠加逻辑只看 change_request.status=approved，
+    没看 synced —— 同步器把 synced 置 1 之后那条记录照样被当成「还没写回」。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.add_employee("C001", "主管")
+        self.add_employee("C002", "工人")
+        self.add_process("ZD1", 2, "四针六线裤", 0.77)
+        self.add_bundle("ZD1", 1, 10, 100)
+        self.rid = self.db.create_report(
+            "S", "ZD1", 1, 10, 2, "四针六线裤", "C002", "工人", 20, 0.77)["id"]
+        self.db.get_conn().execute(
+            "UPDATE report SET status='synced', jfgzid=555 WHERE id=?",
+            (self.rid,))
+        self.db.get_conn().commit()
+        self.push_reports([(555, "2026-10-13 10:00:00", "C002", "工人",
+                            "ZD1", 2, 1, 10, 20, 0.77, 15.4, 1)])
+        self.today = datetime.date.today().isoformat()
+
+    def _mine(self):
+        return self.db.report_mine("2020-01-01", self.today, "C002")
+
+    def _approve_and_sync(self):
+        cid = self.db.create_change(self.rid, "C002", "工人", 11, "多扫",
+                                    approved_by="C001")
+        self.db.mark_change_synced(cid, True)
+        return cid
+
+    def test_同步前显示等同步(self):
+        self.db.create_change(self.rid, "C002", "工人", 11, "多扫",
+                              approved_by="C001")
+        r = self._mine()[0]
+        self.assertEqual(r["chg"], "approved")
+        self.assertFalse(r.get("chg_done"), "还没写回 jfgz，不能算办完")
+
+    def test_同步后标记为已完成(self):
+        self._approve_and_sync()
+        r = self._mine()[0]
+        self.assertEqual(r["chg_done"], 1, "synced=1 之后就不该再等同步")
+
+    def test_同步后本地报工数量跟着更新(self):
+        """jfgz 已经是 11，本地 report.js 还停在 20 的话：
+        「新数量=原数量」判断失效（能反复提交），
+        超量重算 reported-20+new 也会少算一截，主管能改到超量。
+        """
+        self._approve_and_sync()
+        rep = self.db.get_report(self.rid)
+        self.assertEqual(rep["js"], 11)
+        self.assertAlmostEqual(rep["je"], 11 * 0.77, places=2)
+
+    def test_同步后数量仍显示新值(self):
+        """本地镜像还没拉回来时，jfgz_report 里还是旧数，
+        叠加必须继续顶着，否则页面又变回「改了没反应」的 20。
+        """
+        self._approve_and_sync()
+        self.assertEqual(self._mine()[0]["js"], 11)
+
+    def test_镜像拉到新数后不再叠加(self):
+        """镜像也更新成 11 之后，数据库就是真相，
+        不该再显示成「已改量（原 11）」。
+        """
+        self._approve_and_sync()
+        self.push_reports([(555, "2026-10-13 10:00:00", "C002", "工人",
+                            "ZD1", 2, 1, 10, 11, 0.77, 8.47, 1)])
+        r = self._mine()[0]
+        self.assertEqual(r["js"], 11)
+        self.assertIsNone(r.get("chg"), "镜像已是新数，不必再标改量")
+
+    def test_回写失败仍然算等同步(self):
+        cid = self.db.create_change(self.rid, "C002", "工人", 11, "多扫",
+                                    approved_by="C001")
+        self.db.mark_change_synced(cid, False, "写库失败")
+        r = self._mine()[0]
+        self.assertFalse(r.get("chg_done"))
+        self.assertEqual(r["js"], 11)
+        rep = self.db.get_report(self.rid)
+        self.assertEqual(rep["js"], 20, "写库失败就不能动本地数量")

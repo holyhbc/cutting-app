@@ -707,12 +707,34 @@ def list_unsynced_changes(limit=100):
 
 def mark_change_synced(change_id, ok, err=""):
     conn = get_conn()
-    if ok:
-        conn.execute("UPDATE change_request SET synced=1 WHERE id=?", (change_id,))
-    else:
-        conn.execute("UPDATE change_request SET synced=-1, approve_note=? WHERE id=?",
-                     ((err or "")[:500], change_id))
-    conn.commit()
+    with _write_lock:
+        if ok:
+            ch = conn.execute(
+                "SELECT report_id, new_num FROM change_request WHERE id=?",
+                (change_id,)).fetchone()
+            conn.execute("UPDATE change_request SET synced=1 WHERE id=?", (change_id,))
+            # jfgz 里已经是新数了，本地 report.js 还停在旧数。
+            # 不对齐有两个后果：
+            #   1) 「新数量和原数量一样」拿旧数比 → 同一改完的主管再也改不动；
+            #   2) 超量重算 reported - rep.js + new_js 里 rep.js 是旧数，
+            #      会少算差的那一截，主管能借此把一扎改到超量。
+            if ch and ch["report_id"]:
+                try:
+                    rep = conn.execute("SELECT js, je FROM report WHERE id=?",
+                                       (ch["report_id"],)).fetchone()
+                    if rep and int(rep["js"] or 0) > 0:
+                        rate = float(rep["je"] or 0) / int(rep["js"])
+                        conn.execute(
+                            "UPDATE report SET js=?, je=? WHERE id=?",
+                            (int(ch["new_num"]),
+                             round(int(ch["new_num"]) * rate, 4),
+                             ch["report_id"]))
+                except Exception:
+                    pass
+        else:
+            conn.execute("UPDATE change_request SET synced=-1, approve_note=? WHERE id=?",
+                         ((err or "")[:500], change_id))
+        conn.commit()
 
 
 # ============================================================
@@ -991,12 +1013,18 @@ def report_mine(dfrom, dto, ygno, limit=100):
     if rids:
         q = ",".join("?" * len(rids))
         chg = {c["report_id"]: c for c in get_conn().execute(
-            f"SELECT report_id, old_num, new_num, status FROM change_request"
+            f"SELECT report_id, old_num, new_num, status, synced FROM change_request"
             f" WHERE report_id IN ({q})"
             f"   AND status IN ('pending','approved') ORDER BY id DESC", rids)}
         for r in merged:
             c = chg.get(r.get("id"))
             if not c:
+                continue
+            # synced=1 表示已经写回 jfgz，改量彻底办完了。
+            # 此时如果本地镜像也已经拉到新数，数据库就是真相，别再叠加 ——
+            # 不然每刷新一次都显示「已改量（原 20）」，原数永远追不上新数。
+            done = c["status"] == "approved" and int(c["synced"] or 0) == 1
+            if done and int(r["js"] or 0) == int(c["new_num"] or 0):
                 continue
             r["js_old"] = r["js"]
             r["js"] = int(c["new_num"])
@@ -1007,6 +1035,8 @@ def report_mine(dfrom, dto, ygno, limit=100):
             except Exception:
                 pass
             r["chg"] = c["status"]
+            # chg_done=1：这条改量已经落地，页面不该再写「等同步 / 改量中」
+            r["chg_done"] = 1 if done else 0
     return merged
 
 
@@ -1022,8 +1052,18 @@ def report_mine_summary(dfrom, dto, ygno):
     }
 
 
-def list_report_workers(limit=60):
-    """有报工记录的工号列表，供主管选择代改谁的报工。"""
-    return [r[0] for r in get_conn().execute(
-        "SELECT DISTINCT ygno FROM report WHERE ygno IS NOT NULL AND ygno<>'' "
-        "ORDER BY ygno LIMIT ?", (int(limit),)).fetchall()]
+def list_report_workers(limit=300):
+    """有报工记录的工号 + 姓名，供主管选择看谁/代改谁的报工。
+
+    只返回工号的话，主管根本认不出谁是谁，一百多号人对着工号猜。
+    姓名优先取最近一条报工自带的 ygname，退回 ygzl 花名册 ——
+    ygzl 没同步到的新员工，至少还有报工记录里的名字。
+    """
+    return [dict(r) for r in get_conn().execute(
+        "SELECT t.g ygno,"
+        "       COALESCE(NULLIF(rr.ygname,''), NULLIF(z.ygname,''), '') ygname "
+        "  FROM (SELECT ygno g, MAX(id) id FROM report "
+        "         WHERE ygno IS NOT NULL AND ygno<>'' GROUP BY ygno) t "
+        "  LEFT JOIN report rr ON rr.id = t.id "
+        "  LEFT JOIN ygzl z ON z.ygno = t.g "
+        " ORDER BY t.g LIMIT ?", (int(limit),)).fetchall()]
