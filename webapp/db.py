@@ -646,8 +646,12 @@ def create_change(report_id, ygno, ygname, new_js, reason,
     return new_id
 
 
-def list_changes(status="pending", ygno=None, limit=200):
-    """列改量申请。主管看全部（可按状态筛），工人只看自己的。"""
+def list_changes(status="pending", ygno=None, limit=200, oldest_first=False):
+    """列改量申请。主管看全部（可按状态筛），工人只看自己的。
+
+    oldest_first=True 供同步器拉取用：先发最早批准的单子，
+    否则 id DESC + limit 会让积压的老单子永远排在窗口外。
+    """
     sql = "SELECT * FROM change_request WHERE 1=1"
     args = []
     if status:
@@ -656,7 +660,7 @@ def list_changes(status="pending", ygno=None, limit=200):
     if ygno:
         sql += " AND ygno=?"
         args.append(ygno)
-    sql += " ORDER BY id DESC LIMIT ?"
+    sql += " ORDER BY id ASC LIMIT ?" if oldest_first else " ORDER BY id DESC LIMIT ?"
     args.append(limit)
     # SQLite 的 execute 只接受 (sql, 序列)，不能用 *args 展开
     return [dict(r) for r in get_conn().execute(sql, args).fetchall()]
@@ -699,8 +703,9 @@ def count_pending_changes():
 
 
 def list_unsynced_changes(limit=100):
+    """还没写回 SQL Server 的已批准改量（synced=0 或上次失败 -1）。"""
     rows = get_conn().execute(
-        "SELECT * FROM change_request WHERE status='approved' AND synced=0 "
+        "SELECT * FROM change_request WHERE status='approved' AND synced<>1 "
         "ORDER BY id LIMIT ?", (limit,)).fetchall()
     return [dict(r) for r in rows]
 
@@ -712,7 +717,9 @@ def mark_change_synced(change_id, ok, err=""):
             ch = conn.execute(
                 "SELECT report_id, new_num FROM change_request WHERE id=?",
                 (change_id,)).fetchone()
-            conn.execute("UPDATE change_request SET synced=1 WHERE id=?", (change_id,))
+            conn.execute(
+                "UPDATE change_request SET synced=1, sync_err='' WHERE id=?",
+                (change_id,))
             # jfgz 里已经是新数了，本地 report.js 还停在旧数。
             # 不对齐有两个后果：
             #   1) 「新数量和原数量一样」拿旧数比 → 同一改完的主管再也改不动；
@@ -732,8 +739,12 @@ def mark_change_synced(change_id, ok, err=""):
                 except Exception:
                     pass
         else:
-            conn.execute("UPDATE change_request SET synced=-1, approve_note=? WHERE id=?",
-                         ((err or "")[:500], change_id))
+            # 失败原因写 sync_err，不要覆盖 approve_note ——
+            # 那是主管的审批意见，属于留痕数据。
+            # 之前写成 approve_note，一次失败就把审批意见冲没了。
+            conn.execute(
+                "UPDATE change_request SET synced=-1, sync_err=? WHERE id=?",
+                ((err or "")[:500], change_id))
         conn.commit()
 
 
@@ -1013,7 +1024,8 @@ def report_mine(dfrom, dto, ygno, limit=100):
     if rids:
         q = ",".join("?" * len(rids))
         chg = {c["report_id"]: c for c in get_conn().execute(
-            f"SELECT report_id, old_num, new_num, status, synced FROM change_request"
+            f"SELECT report_id, old_num, new_num, status, synced, sync_err"
+            f" FROM change_request"
             f" WHERE report_id IN ({q})"
             f"   AND status IN ('pending','approved') ORDER BY id DESC", rids)}
         for r in merged:
@@ -1023,7 +1035,8 @@ def report_mine(dfrom, dto, ygno, limit=100):
             # synced=1 表示已经写回 jfgz，改量彻底办完了。
             # 此时如果本地镜像也已经拉到新数，数据库就是真相，别再叠加 ——
             # 不然每刷新一次都显示「已改量（原 20）」，原数永远追不上新数。
-            done = c["status"] == "approved" and int(c["synced"] or 0) == 1
+            synced = int(c["synced"] or 0)
+            done = c["status"] == "approved" and synced == 1
             if done and int(r["js"] or 0) == int(c["new_num"] or 0):
                 continue
             r["js_old"] = r["js"]
@@ -1037,6 +1050,10 @@ def report_mine(dfrom, dto, ygno, limit=100):
             r["chg"] = c["status"]
             # chg_done=1：这条改量已经落地，页面不该再写「等同步 / 改量中」
             r["chg_done"] = 1 if done else 0
+            # chg_synced=-1：写回失败过。只写「等同步」会让人以为只是还没跑，
+            # 实际是同步器报过错了 —— 原因要摆出来，否则永远查不出问题在哪。
+            r["chg_synced"] = synced
+            r["chg_err"] = (c["sync_err"] or "") if synced == -1 else ""
     return merged
 
 

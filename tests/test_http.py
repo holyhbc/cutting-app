@@ -730,6 +730,95 @@ for t in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)]
                       "同步完了就不该再锁死")
 
 
+class TestChangesExportRetry(HTTPTestCase):
+    """/api/changes 导出：写回失败的单子必须还能被发出去。
+
+    线上：同步器每轮都因为 KeyError 失败 → ack 把 synced 置 -1；
+    而导出过滤写的是 `not r["synced"]`，-1 是真值，
+    于是失败的单子从下一轮起就被永久拉黑，再也没有机会写进 jfgz ——
+    主管那边就一直看着「已改量（原 20），等同步」+「改量中」。
+    """
+
+    SYNC = "test-token-for-unit-test"
+
+    def setUp(self):
+        super().setUp()
+        self.add_employee("C001", "主管")
+        self.add_employee("C002", "工人")
+        self.add_process("ZD1", 2, "四针六线裤", 0.77)
+        self.add_bundle("ZD1", 1, 10, 100)
+        rid = self.db.create_report("S", "ZD1", 1, 10, 2, "四针六线裤",
+                                    "C002", "工人", 20, 0.77)["id"]
+        self.db.get_conn().execute(
+            "UPDATE report SET status='synced', jfgzid=555 WHERE id=?", (rid,))
+        self.db.get_conn().commit()
+        self.push_reports([(555, "2026-10-13 01:50:00", "C002", "工人",
+                            "ZD1", 2, 1, 14, 20, 0.77, 15.4, 1)])
+        self.rid = rid
+
+    def _export(self):
+        import urllib.request
+        req = urllib.request.Request(
+            self.base + "/api/changes?status=approved",
+            headers={"Authorization": f"Bearer {self.SYNC}"})
+        return json.loads(urllib.request.urlopen(req, timeout=20).read())
+
+    def _ack(self, results):
+        import urllib.request
+        req = urllib.request.Request(
+            self.base + "/api/changes/ack",
+            data=json.dumps({"results": results}).encode(), method="POST",
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {self.SYNC}"})
+        return json.loads(urllib.request.urlopen(req, timeout=20).read())
+
+    def test_写回失败的仍会导出(self):
+        cid = self.db.create_change(self.rid, "C002", "工人", 9, "多扫",
+                                    approved_by="C001")
+        self._ack([{"id": cid, "ok": False, "msg": "写库失败"}])
+        got = [c["id"] for c in self._export()["changes"]]
+        self.assertIn(cid, got, "synced=-1 被拉黑了，永远重试不到")
+
+    def test_写回成功的不再导出(self):
+        cid = self.db.create_change(self.rid, "C002", "工人", 9, "多扫",
+                                    approved_by="C001")
+        self._ack([{"id": cid, "ok": True}])
+        self.assertNotIn(cid, [c["id"] for c in self._export()["changes"]])
+
+    def test_导出字段名与同步器一致(self):
+        """payload 里必须有 new_num —— sync_reports 按这个名字读。
+        （之前是 new_js，同步器每次 KeyError，改量从没成功过。）
+        """
+        cid = self.db.create_change(self.rid, "C002", "工人", 9, "多扫",
+                                    approved_by="C001")
+        ch = [c for c in self._export()["changes"] if c["id"] == cid][0]
+        self.assertEqual(ch["new_num"], 9)
+        self.assertIn("old_num", ch)
+        self.assertIn("jfgzid", ch)
+        self.assertIn("ygno", ch)
+
+    def test_失败原因不冲掉审批意见(self):
+        """approve_note 是主管的审批意见，属于留痕数据。
+        之前失败时把错误信息写进去了，审批意见一次就被冲没。
+        """
+        cid = self.db.create_change(self.rid, "C002", "工人", 9, "多扫",
+                                    approved_by="C001", note="多扫了，按少的算")
+        self._ack([{"id": cid, "ok": False, "msg": "KeyError: 'new_js'"}])
+        row = self.db.get_conn().execute(
+            "SELECT approve_note, sync_err FROM change_request WHERE id=?",
+            (cid,)).fetchone()
+        self.assertEqual(row["approve_note"], "多扫了，按少的算", "审批意见被冲掉了")
+        self.assertIn("new_js", row["sync_err"], "失败原因要有地方放")
+
+    def test_失败原因显示在页面上(self):
+        cid = self.db.create_change(self.rid, "C002", "工人", 9, "多扫",
+                                    approved_by="C001")
+        self._ack([{"id": cid, "ok": False, "msg": "jfgz 里找不到这单"}])
+        code, body = self.get("/report/mine?ygno=C002", self.login("C001"))
+        self.assertIn("改量没写进数据库", body)
+        self.assertIn("jfgz 里找不到这单", body, "失败原因要能看见，不然查不动")
+
+
 class TestWorkerPicker(HTTPTestCase):
     """主管选人下拉：带姓名，且收起状态要显示当前选中的那个人。
 

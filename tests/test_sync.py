@@ -16,11 +16,16 @@ sys.path.insert(0, os.path.join(
 import _bootstrap  # noqa: F401,E402
 import sync_reports as SR   # noqa: E402
 
-from base import FakeCursor   # noqa: E402
+from base import FakeCursor, ScanTestCase   # noqa: E402
 
 
+# 这份夹具必须是 /api/changes **真实发出来的字段名**。
+# 之前这里写的是 new_js，而 rules.change_view 发的是 new_num ——
+# 字段名对不上，cur_change_id / apply_change 每次都抛 KeyError，
+# 被 main() 的 except 吞成「回执 ok=False」，改量一条都没写进 jfgz。
+# 单测用自己的夹具、绕开真实接口，所以一直没暴露。
 CHANGE = {
-    "id": 1, "jfgzid": 129416, "ygno": "C002", "old_num": 100, "new_js": 92,
+    "id": 1, "jfgzid": 129416, "ygno": "C002", "old_num": 100, "new_num": 92,
     "reason": "这件重复裁了8件", "status": "approved", "approve_gh": "C001",
     "approve_note": "", "created_at": "2026-10-12 10:05:00",
     "approve_at": "2026-10-12 10:30:00", "short_id": "",
@@ -111,7 +116,7 @@ class TestApplyChange(unittest.TestCase):
                          "被拒时绝不能改 jfgz")
 
     def test_数量相同不重复改(self):
-        ch = dict(self.ch, new_js=100)
+        ch = dict(self.ch, new_num=100)
         cur = self._cur(**{"SUM(js),0) FROM jfgz": [[100]],
                           "FROM jfzd2 WHERE": [[264]]})
         ok, msg, _ = SR.apply_change(cur, ch)
@@ -156,6 +161,83 @@ class TestInsertReport(unittest.TestCase):
         SR.insert_report(cur, rec, "x", 0.1234567)
         # jfgz INSERT 参数：0 gzdate 1 ygno 2 zdno 3 gx 4 cc 5 zh 6 js 7 dj 8 je
         self.assertAlmostEqual(cur.log[0][1][8], 4.074, places=3)
+
+
+class TestChangePayloadContract(ScanTestCase):
+    """接口字段名与同步器之间的契约 —— 改量上线以来从没真正成功过的根因。
+
+    线上表现：主管改量，页面一直显示「已改量（原 20），等同步」+「改量中」，
+    后台同步任务跑过好几轮，jfgz 里的数量纹丝不动。
+
+    链路：rules.change_view → /api/changes → sync_reports.cur_change_id /
+    apply_change。两边字段名只要对不上就是 KeyError，被 main() 的
+    except 吞掉当成「写回失败」，从日志上看还像那么回事。
+    单测之前用手抄夹具 + 直接调函数，绕开了真实接口，两边对不上也测不出来。
+
+    这里不用手抄：真的造一条 change_request，走真的 change_view，
+    再喂给真的同步器函数。
+    """
+
+    def _real_payload(self):
+        self.add_employee("C001", "主管")
+        self.add_employee("C002", "工人")
+        self.add_process("ZD1", 2, "四针六线裤", 0.77)
+        self.add_bundle("ZD1", 1, 10, 100)
+        rid = self.db.create_report("S", "ZD1", 1, 10, 2, "四针六线裤",
+                                    "C002", "工人", 20, 0.77)["id"]
+        self.db.get_conn().execute(
+            "UPDATE report SET status='synced', jfgzid=555 WHERE id=?", (rid,))
+        self.db.get_conn().commit()
+        cid = self.db.create_change(rid, "C002", "工人", 9, "多扫了",
+                                    approved_by="C001")
+        ch = self.db.get_conn().execute(
+            "SELECT * FROM change_request WHERE id=?", (cid,)).fetchone()
+        import rules
+        return rules.change_view(ch)
+
+    def test_真实payload能走通留痕(self):
+        payload = self._real_payload()
+        self.assertEqual(payload["new_num"], 9, "接口发的是 new_num")
+        cur = FakeCursor(rows_by_key={
+            "FROM jfzg_change": [],                    # 没写过 → 要插
+            "FROM jfgz": [[555, 2, 1, 10]],            # 报工本身在
+            "FROM jfdj": [["四针六线裤"]],
+            "@@IDENTITY": [[700]],
+        })
+        cid = SR.cur_change_id(cur, payload)          # KeyError 就是回归
+        self.assertEqual(cid, 700)
+        sql = " ".join(s for s, _ in cur.log)
+        self.assertIn("INSERT INTO jfzg_change", sql)
+        # 插入参数里必须带着改后数量 9
+        params = [a for s, a in cur.log if "INSERT INTO jfzg_change" in s][0]
+        self.assertIn(9, params, f"改后数量没带上：{params}")
+
+    def test_真实payload能走通改数(self):
+        payload = self._real_payload()
+        cur = FakeCursor(rows_by_key={
+            "status FROM jfzg_change": [[700, "C002", 1]],      # 审批单存在且通过
+            # 报工当前值：zdno, cc, zh, gx, js, dj
+            "ISNULL(dj,0) FROM jfgz": [["ZD1", 1, 10, 2, 20, 0.77]],
+            "SUM(js),0) FROM jfgz": [[100]],
+            "FROM jfzd2 WHERE": [[100]],
+        })
+        ok, msg, cid = SR.apply_change(cur, payload)
+        self.assertTrue(ok, msg)
+        self.assertEqual(cid, 700)
+        upd = [a for s, a in cur.log if s.startswith("UPDATE jfgz SET js")]
+        self.assertTrue(upd, "没有发出改数语句")
+        self.assertEqual(upd[0][0], 9, "改成的新数量不对")
+
+    def test_没有残留的new_js字面量(self):
+        """静态兜底：sync_reports 里不该再直接索引 ch["new_js"]。"""
+        import re
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "webapp", "sync_reports.py")
+        src = open(path, encoding="utf-8").read()
+        body = re.sub(r'"""[\s\S]*?"""', "", src)      # 注释里提一句不算
+        for hit in re.findall(r'ch\[(?:"|\')new_js(?:"|\')\]', body):
+            self.fail(f"还有直接索引 ch[{hit}] —— 接口字段名是 new_num")
 
 
 class TestReportFetcher(unittest.TestCase):

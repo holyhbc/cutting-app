@@ -1537,9 +1537,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         u = urlparse(self.path)
         status = (parse_qs(u.query).get("status", ["approved"])[0] or "approved")
-        rows = D.list_changes(status=status, limit=200)
+        rows = D.list_changes(status=status, limit=200, oldest_first=True)
         if status == "approved":
-            rows = [r for r in rows if not r["synced"]]
+            # 只要不是 1 就还要发：synced=-1 是上次写回失败，
+            # apply_change 幂等（数量已是目标值就直接返回成功），
+            # 重试是安全的。之前写的是 `not r["synced"]`，
+            # -1 是真值，失败的单子一失败就被永久拉黑，再也没机会写进去。
+            rows = [r for r in rows if int(r["synced"] or 0) != 1]
         self._json({"ok": True, "count": len(rows),
                     "changes": [R.change_view(r) for r in rows]})
 
@@ -1704,6 +1708,13 @@ class Handler(BaseHTTPRequestHandler):
                     # 每次打开都以为同步没生效。
                     status = ('<span style="font-size:11px;color:#1a7f3d">'
                               f'已改量（原 {r.get("js_old")}），已同步</span>')
+                elif int(r.get("chg_synced") or 0) == -1:
+                    # 同步器报过错。写「等同步」只会让人以为是还没跑，
+                    # 实际是失败了 —— 把原因摆出来才查得动。
+                    err = esc(r.get("chg_err") or "未知原因")
+                    status = ('<span style="font-size:11px;color:#c0392b">'
+                              '改量没写进数据库</span>'
+                              f'<div style="font-size:11px;color:#999">{err}</div>')
                 else:
                     status = ('<span style="font-size:11px;color:#1a73a8">'
                               f'已改量（原 {r.get("js_old")}）'

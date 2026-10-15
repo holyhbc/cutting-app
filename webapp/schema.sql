@@ -184,7 +184,11 @@ CREATE TABLE IF NOT EXISTS change_request (
     approve_note TEXT,
     created_at TEXT    NOT NULL,          -- 用于 30 天时限判断
     approve_at TEXT,
-    synced     INTEGER NOT NULL DEFAULT 0 -- 1=已写回 SQL Server
+    -- 1=已写回 SQL Server；0=还没写；-1=写回失败，等同步器重试。
+    -- sync_err 存失败原因 —— 不能塞进 approve_note，
+    -- 那是主管的审批意见，属于留痕数据，被错误信息冲掉就查不回来了。
+    synced     INTEGER NOT NULL DEFAULT 0,
+    sync_err   TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS ix_change_status ON change_request (status, id);
 CREATE INDEX IF NOT EXISTS ix_change_report ON change_request (report_id);

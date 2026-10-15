@@ -105,6 +105,24 @@ def already_exists(cur, rec):
     return r[0] if r else None
 
 
+def _new_num(ch):
+    """取改后数量。
+
+    接口字段名是 new_num（rules.change_view 就是这么发的）。
+    这里原先写的是 ch["new_js"] —— 字段名一对不上，每次同步都抛
+    KeyError，被 main() 的 except 吞成「回执 ok=False」，
+    于是改量一条都写不进 jfgz，而 VPS 那边 synced 被置 -1 之后
+    又被导出过滤挡掉，永远不再重试 ——
+    页面就一直显示「已改量（原 20），等同步」+「改量中」，
+    实际上一件都没改。两个名字都认，避免同类问题再咬一次。
+    """
+    for k in ("new_num", "new_js"):
+        v = ch.get(k)
+        if v is not None:
+            return int(v)
+    raise KeyError("new_num")
+
+
 def cur_change_id(cur, ch):
     """把 VPS 上已批准的改量申请写入 SQL Server 的 jfzg_change，返回该单 id。
 
@@ -118,7 +136,7 @@ def cur_change_id(cur, ch):
     cur.execute(
         "SELECT TOP 1 id FROM jfzg_change "
         "WHERE jfgzid=? AND ygno=? AND new_num=? AND status=1 ORDER BY id DESC",
-        ch["jfgzid"], ch["ygno"], int(ch["new_js"]))
+        ch["jfgzid"], ch["ygno"], _new_num(ch))
     row = cur.fetchone()
     if row:
         return int(row[0])
@@ -143,7 +161,7 @@ def cur_change_id(cur, ch):
         " created_at, approve_at) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         ch.get("short_id") or "", ch["jfgzid"], ch["ygno"], gx, gxname,
-        zdno, cc, zh, int(ch.get("old_num") or 0), int(ch["new_js"]),
+        zdno, cc, zh, int(ch.get("old_num") or 0), _new_num(ch),
         ch.get("reason") or "", 1, ch.get("approve_gh") or "",
         ch.get("approve_note") or "", ch.get("created_at") or "",
         ch.get("approve_at") or "")
@@ -178,7 +196,7 @@ def apply_change(cur, ch):
         return False, f"jfgzid={jfgzid} 在 jfgz 里不存在", None
     zdno, cc, zh, gx, old_js, dj = cur_rec
 
-    new_js = int(ch["new_js"])
+    new_js = _new_num(ch)
     # 幂等：数量已经等于目标值，说明这单早就处理过了，不要重复改
     if int(old_js) == new_js:
         return True, f"数量已是 {new_js}，无需改", chg_id
