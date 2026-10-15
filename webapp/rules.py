@@ -45,11 +45,13 @@ def find_employee(ygno):
 
 # ---------------------------------------------------------------- 上限校验
 
-def check_and_build_report(short_id, zdno, cc, zh, gx, ygno, js):
-    """校验报工请求并组装待写入记录。任一不通过则抛 RuleError。
+def _check_common(zdno, cc, zh, gx, js, bad_gx_msg="", no_plan_msg=""):
+    """数量/工序/应做数/超量校验 —— 扫码报工和手动报工共用。
 
-    上限规则（DECISIONS.md D-006，实测倍率 1.00）：
-        已报(该扎该工序全部人合计) <= 该扎应做数
+    抽出来是因为两条路必须卡同一套规则：手动报工只是没有二维码而已，
+    不能因为走的是「代报」就把上限校验放松掉。
+
+    返回去掉 short_id 的报工信息。
     """
     try:
         js = int(js)
@@ -62,28 +64,21 @@ def check_and_build_report(short_id, zdno, cc, zh, gx, ygno, js):
 
     gx = int(gx)
     cc, zh = int(cc), int(zh)
-
-    smap = get_conn().execute(
-        "SELECT * FROM scan_map WHERE short_id=?", (short_id,)).fetchone()
-    if not smap:
-        raise RuleError("二维码无效或已过期，请重新打印标签", "bad_short_id")
-
-    # 以映射表里的三元组为准，不信任前端传来的 zdno/cc/zh，防止改参数越权
-    _, m_zdno, m_cc, m_zh = smap[0], smap[1], smap[2], smap[3]
-    if (str(m_zdno), m_cc, m_zh) != (str(zdno), cc, zh):
-        raise RuleError("标签与提交内容不一致，请重新扫码", "mismatch")
+    zdno = str(zdno or "").strip()
+    if not zdno:
+        raise RuleError("请先选择定单", "no_zdno")
 
     proc = get_conn().execute(
-        "SELECT gx, gxname, dj FROM process WHERE zdno=? AND gx=?", (m_zdno, gx)).fetchone()
+        "SELECT gx, gxname, dj FROM process WHERE zdno=? AND gx=?", (zdno, gx)).fetchone()
     if not proc:
-        raise RuleError("该定单没有这道工序，可能标签印错了", "bad_gx")
+        raise RuleError(bad_gx_msg or "该定单没有这道工序，可能标签印错了", "bad_gx")
     _, gxname, dj = proc[0], proc[1], float(proc[2] or 0)
 
-    plan = get_plan_qty(m_zdno, m_cc, m_zh)
+    plan = get_plan_qty(zdno, cc, zh)
     if plan <= 0:
-        raise RuleError("这扎没有应做数，可能标签印错了", "no_plan")
+        raise RuleError(no_plan_msg or "这扎没有应做数，可能标签印错了", "no_plan")
 
-    reported = get_reported_qty(m_zdno, m_cc, m_zh, gx)
+    reported = get_reported_qty(zdno, cc, zh, gx)
     remain = plan - reported
     if js > remain:
         raise RuleError(
@@ -91,10 +86,49 @@ def check_and_build_report(short_id, zdno, cc, zh, gx, ygno, js):
             f"「{gxname}」已报 {reported} 件，剩余 {max(remain,0)} 件",
             "over_limit")
 
-    return {
-        "short_id": short_id, "zdno": m_zdno, "cc": m_cc, "zh": m_zh,
-        "gx": gx, "gxname": gxname, "dj": dj, "js": js,
-    }
+    return {"zdno": zdno, "cc": cc, "zh": zh,
+            "gx": gx, "gxname": gxname, "dj": dj, "js": js}
+
+
+def check_and_build_report(short_id, zdno, cc, zh, gx, ygno, js):
+    """扫码报工校验并组装待写入记录。任一不通过则抛 RuleError。
+
+    上限规则（DECISIONS.md D-006，实测倍率 1.00）：
+        已报(该扎该工序全部人合计) <= 该扎应做数
+    """
+    smap = get_conn().execute(
+        "SELECT * FROM scan_map WHERE short_id=?", (short_id,)).fetchone()
+    if not smap:
+        raise RuleError("二维码无效或已过期，请重新打印标签", "bad_short_id")
+
+    # 以映射表里的三元组为准，不信任前端传来的 zdno/cc/zh，防止改参数越权
+    _, m_zdno, m_cc, m_zh = smap[0], smap[1], smap[2], smap[3]
+    if (str(m_zdno), int(m_cc), int(m_zh)) != (str(zdno), int(cc), int(zh)):
+        raise RuleError("标签与提交内容不一致，请重新扫码", "mismatch")
+
+    info = _check_common(m_zdno, m_cc, m_zh, gx, js)
+    info["short_id"] = short_id
+    return info
+
+
+def check_manual_report(zdno, cc, zh, gx, ygno, js):
+    """主管手动报工（代报）：二维码丢了没法扫码时代工人录入。
+
+    与扫码走同一套上限校验（_check_common），只是少了二维码这一环：
+    - short_id 留空 —— 没有标签就没有映射，
+    - 三元组以主管选中的 bundle 为准，不来自扫码。
+
+    ygno 必须是花名册里在职的人，否则报错 —— 代报也得落到真实员工头上。
+    """
+    emp = find_employee(ygno)
+    info = _check_common(
+        zdno, cc, zh, gx, js,
+        bad_gx_msg="这个定单没有这道工序，请检查是不是选错了定单",
+        no_plan_msg="这扎没有应做数，可能还没推送报表数据")
+    info["short_id"] = ""
+    info["ygno"] = emp["ygno"]
+    info["ygname"] = emp["ygname"]
+    return info
 
 
 def employee_change_limit(zdno, cc, zh, gx, ygno):

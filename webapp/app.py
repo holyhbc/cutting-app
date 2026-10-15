@@ -976,6 +976,8 @@ def page_report_home(me, meta, token, is_sup):
            f'📈 定单进度</a>' if is_sup else "")
         + (f'<a class="btn" href="/report/orders?t={esc(token)}">'
            f'📋 在手定单</a>' if is_sup else "")
+        + (f'<a class="btn" href="/report/manual?t={esc(token)}">'
+           f'✍️ 手动报工</a>' if is_sup else "")
         + (f'<a class="btn ghost" href="/admin?t={esc(token)}">'
            f'⚙️ 主管后台</a>' if is_sup else "")
         + (f'<a class="btn" href="/report/wage?t={esc(token)}">'
@@ -1153,6 +1155,186 @@ def page_report_table(title, sub, headers, rows, token, back, total=None):
     return _page_shell(title, "".join(body))
 
 
+def page_manual_report(me, token, ygno, zdno, cc, zh,
+                       emps, bundles, view, kw="", zq="", hint_html=""):
+    """主管手动报工（代报）向导。
+
+    为什么要有：二维码丢了/脏了/没打印，工人没法扫码就报不了工，
+    计件工资直接少一截。主管凭员工 + 定单号就能代录。
+
+    三步都是普通 GET 表单，没 JS 也能走完：
+      1 选工人（工号或姓名模糊搜）
+      2 选定单 + 扎（zdno 模糊搜）
+      3 选工序 + 填数量 → POST
+    上限校验走 rules._check_common，跟扫码报工同一套，不因为代录就放松。
+    """
+    back = f'<a class="btn ghost" href="/report?t={esc(token)}">← 返回报表</a>'
+    body = [f'<div class="card"><h1>✍️ 手动报工</h1>'
+            f'<p class="sub">给二维码丢了没法扫码的工人代录。'
+            f'记在<b>{esc(me["ygname"])}（{esc(me["ygno"])}）</b>名下。</p>{back}</div>']
+
+    # ---- 1. 选工人 ----
+    step = []
+    if ygno:
+        step.append(f'<p class="sub">1. 工人</p>'
+                    f'<div class="kv"><span class="k">当前</span>'
+                    f'<span class="v">{esc(ygno)}</span></div>'
+                    f'<a class="btn ghost" href="/report/manual?t={esc(token)}">'
+                    f'← 重选工人</a>')
+    else:
+        rows = "".join(
+            f'<a class="btn ghost" style="text-align:left" '
+            f'href="/report/manual?t={esc(token)}&amp;wq={esc(kw)}'
+            f'&amp;ygno={esc(e["ygno"])}">'
+            f'<div style="display:flex;justify-content:space-between">'
+            f'<span>{esc(e["ygname"])}</span>'
+            f'<span style="color:#888;font-weight:400">{esc(e["ygno"])}</span>'
+            f'</div></a>'
+            for e in emps) if emps else (
+            '<p class="muted">没找到这个人。搜工号或姓名的部分就行。</p>')
+        step.append(
+            '<p class="sub">1. 工人（可输工号或姓名模糊搜）</p>'
+            '<form method="GET" action="/report/manual">'
+            f'<input type="hidden" name="t" value="{esc(token)}">'
+            f'<input name="wq" value="{esc(kw)}" '
+            'placeholder="工号 C002 或姓名，如 阿珍" autocomplete="off">'
+            '<button type="submit">查这个人</button></form>'
+            + (f'<p class="tip">找到 {len(emps)} 个人，点一下选中</p>' if emps else "")
+            + rows)
+    body.append(f'<div class="card">{"".join(step)}</div>')
+    if not ygno:
+        return _page_shell("手动报工", "".join(body))
+
+    # ---- 2. 选定单 + 扎 ----
+    if not zdno:
+        rows = "".join(
+            f'<a class="btn ghost" style="text-align:left" '
+            f'href="/report/manual?t={esc(token)}&amp;ygno={esc(ygno)}'
+            f'&amp;zdno={esc(b["zdno"])}&amp;cc={b["cc"]}&amp;zh={b["zh"]}">'
+            f'<div style="display:flex;justify-content:space-between">'
+            f'<span>{esc(b["zdno"])}{(" " + esc(b["yn"])) if b.get("yn") else ""}</span>'
+            f'<span style="color:#888;font-weight:400">'
+            f'{b["cc"]}层 第{b["zh"]}扎 · {b["plan_qty"]}件</span>'
+            f'</div></a>'
+            for b in bundles) if bundles else (
+            '<p class="muted">没找到这个定单的扎。'
+            '要先在电脑上跑「报表数据推送」，应做数才会同步过来。</p>')
+        body.append(
+            '<div class="card"><p class="sub">2. 定单和扎（可输定单号模糊搜）</p>'
+            '<form method="GET" action="/report/manual">'
+            f'<input type="hidden" name="t" value="{esc(token)}">'
+            f'<input type="hidden" name="ygno" value="{esc(ygno)}">'
+            f'<input name="zq" value="{esc(zq)}" '
+            'placeholder="定单号，如 269831" autocomplete="off">'
+            '<button type="submit">查这个定单</button></form>'
+            + (f'<p class="tip">找到 {len(bundles)} 扎，点一下选中</p>' if bundles else "")
+            + rows + '</div>')
+        return _page_shell("手动报工", "".join(body))
+
+    # ---- 3. 选工序 + 填数量 ----
+    if not view:
+        body.append('<div class="card"><p class="sub">3. 工序和数量</p>'
+                    '<p class="muted">这扎没有应做数，不能报。'
+                    '可能是报表数据还没推送过来。</p></div>')
+        return _page_shell("手动报工", "".join(body))
+
+    procs = view["processes"]
+    rows = []
+    for p in procs:
+        cls = "proc" + (" done" if p["done"] else "")
+        pill = ('<span class="pill ok">已做完</span>' if p["done"]
+                else f'<span class="pill no">剩 {p["remain"]}</span>')
+        rows.append(
+            f'<div class="{cls}" data-gx="{p["gx"]}" data-remain="{p["remain"]}" '
+            f'data-name="{esc(p["gxname"])}">'
+            f'<div><div class="pn">{p["gx"]}. {esc(p["gxname"])}</div>'
+            f'<div class="ps">单价 {p["dj"]:.4f} 元/件　·　'
+            f'本扎应做 {view["plan_qty"]} 件</div></div>{pill}</div>')
+    ctext = " ".join(sorted({(c.get("yn") or "") + " " + (c.get("cm") or "")
+                             for c in view.get("colors", [])}))
+    hint = ""
+    if not procs:
+        hint = ('<p class="tip warn">这个定单没有工序数据，'
+                '先在电脑上跑「报表数据推送」。</p>')
+    body.append(
+        f'<div class="card">'
+        f'<p class="sub">3. 工序和数量</p>'
+        f'<div class="kv"><span class="k">工人</span><span class="v">{esc(ygno)}</span></div>'
+        f'<div class="kv"><span class="k">定单</span><span class="v">{esc(zdno)}</span></div>'
+        f'<div class="kv"><span class="k">扎</span><span class="v">第 {zh} 扎（{cc} 层）</span></div>'
+        f'<div class="kv"><span class="k">颜色尺码</span>'
+        f'<span class="v">{esc(ctext) or "—"}</span></div>'
+        f'<div class="kv"><span class="k">本扎应做</span>'
+        f'<span class="v big">{view["plan_qty"]} 件</span></div>'
+        # hint_html 是**已经拼好的 HTML**，不能再 esc ——
+        # 调用方转义了自己那段动态内容，这里再转一次，
+        # 报错信息里的 <b> 就会以源码形式显示在页面上。
+        + (f'<p class="tip">{hint_html}</p>' if hint_html else "")
+        + hint
+        + f'<form method="POST" action="/api/report/manual" id="mf" style="margin-top:10px">'
+          f'<input type="hidden" name="token" value="{esc(token)}">'
+          f'<input type="hidden" name="ygno" value="{esc(ygno)}">'
+          f'<input type="hidden" name="zdno" value="{esc(zdno)}">'
+          f'<input type="hidden" name="cc" value="{cc}">'
+          f'<input type="hidden" name="zh" value="{zh}">'
+          f'<input type="hidden" name="gx" id="mgx" value="">'
+          f'<div id="mlist">{"".join(rows)}</div>'
+          f'<label>件数（不是手数）</label>'
+          f'<input name="js" id="mjs" type="number" inputmode="numeric" '
+          f'min="1" step="1" placeholder="点上方工序会自动填入" required>'
+          f'<div class="tip" id="mtip">还没选工序</div>'
+          f'<button type="submit" id="mbtn" disabled>替 {esc(ygno)} 报工</button>'
+          f'</form></div>'
+        + '<script>'
+          'var MJS=document.getElementById("mjs"),MGX=document.getElementById("mgx"),'
+          'MTIP=document.getElementById("mtip"),MBTN=document.getElementById("mbtn");'
+          'function mchk(){var v=parseInt(MJS.value,10);'
+          'if(!MGX.value){MTIP.className="tip";MTIP.textContent="还没选工序";'
+          'MBTN.disabled=true;return;}'
+          'if(!(v>0)){MTIP.className="tip";MTIP.textContent="请填写件数";'
+          'MBTN.disabled=true;return;}'
+          'var el=document.querySelector(\'#mlist .proc[data-gx="\'+MGX.value+\'"]\');'
+          'var rm=el?parseInt(el.dataset.remain,10):0;'
+          'if(v>rm){MTIP.className="tip warn";'
+          'MTIP.textContent="超出剩余，只剩 "+rm+" 件";MBTN.disabled=true;return;}'
+          'MTIP.className="tip ok";MTIP.textContent="可以报 "+v+" 件";'
+          'MBTN.disabled=false;}'
+          'document.querySelectorAll("#mlist .proc").forEach(function(el){'
+          'el.onclick=function(){'
+          'document.querySelectorAll("#mlist .proc").forEach(function(x){'
+          'x.classList.remove("sel");});'
+          'el.classList.add("sel");'
+          'MGX.value=el.dataset.gx;'
+          'if(!MJS.value||parseInt(MJS.value,10)>parseInt(el.dataset.remain,10))'
+          'MJS.value=el.dataset.remain;'
+          'mchk();};});'
+          'MJS.addEventListener("input",mchk);'
+          '</script>')
+    body.append(f'<div class="card">{back}</div>')
+    return _page_shell("手动报工", "".join(body))
+
+
+def page_manual_done(info, me, token):
+    """手动报工成功页。"""
+    return _page_shell(
+        "手动报工", f'<div class="card"><h1>✅ 已记录</h1>'
+        f'<div class="kv"><span class="k">工人</span>'
+        f'<span class="v">{esc(info["ygname"])}（{esc(info["ygno"])}）</span></div>'
+        f'<div class="kv"><span class="k">定单</span><span class="v">{esc(info["zdno"])}</span></div>'
+        f'<div class="kv"><span class="k">扎</span>'
+        f'<span class="v">第 {info["zh"]} 扎（{info["cc"]} 层）</span></div>'
+        f'<div class="kv"><span class="k">工序</span><span class="v">{esc(info["gxname"])}</span></div>'
+        f'<div class="kv"><span class="k">件数</span><span class="v">{info["js"]} 件</span></div>'
+        f'<div class="kv"><span class="k">金额</span>'
+        f'<span class="v">{info["js"] * info["dj"]:.2f} 元</span></div>'
+        f'<div class="ok-msg" style="margin-top:12px">等待同步到服务器。'
+        f'这条记在主管 {esc(me["ygname"])} 名下，来源标记为「手动录入」。</div>'
+        f'<a class="btn" href="/report/mine?t={esc(token)}'
+        f'&amp;ygno={esc(info["ygno"])}">看他的报工</a>'
+        f'<a class="btn ghost" href="/report/manual?t={esc(token)}">'
+        f'再报一条</a></div>')
+
+
 def page_report_prompt(title, token, back, fields, is_sup):
     """报表参数选择页（日期/工号），提交到对应报表页。"""
     opts = "".join(f'<option value="{esc(v)}">{esc(t)}</option>' for v, t in fields)
@@ -1273,6 +1455,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._handle_report_orders()
             if path == "/report/wage":
                 return self._handle_report_wage()
+            if path == "/report/manual":
+                return self._handle_report_manual()
             if path == "/admin":
                 return self._handle_admin()
             if path == "/admin/pending":
@@ -1605,6 +1789,9 @@ class Handler(BaseHTTPRequestHandler):
             "ygno": r["ygno"], "ygname": r["ygname"],
             "js": r["js"], "dj": r["dj"],
             "gzdate": r["gzdate"], "created_at": r["created_at"],
+            # barcode=0 是主管手动录入（没二维码）。不带走的话
+            # 同步器会一律写成 1，SQL Server 里就分不出这批量是扫码还是代录的。
+            "barcode": int(r["barcode"] or 0),
         } for r in rows]
         self._json({"ok": True, "count": len(out), "reports": out})
 
@@ -1754,18 +1941,50 @@ class Handler(BaseHTTPRequestHandler):
                 f'{esc(w["ygno"] + (" " + w["ygname"] if w.get("ygname") else ""))}'
                 f'</option>'
                 for w in workers)
+            # 完整名单也喂给 JS 一份，模糊查询在本地过滤，
+            # 不用每敲一个字就重发一次请求。esc() 会把 < > 换成实体，
+            # 姓名里就算有 </script> 也逃不出脚本块。
+            jall = ",".join(f'{{v:"{esc(w["ygno"])}",'
+                            f't:"{esc(w["ygno"] + " " + w["ygname"])}"}}'
+                            for w in workers)
             # 做成真正的表单并带上 from/to：换个人不该把刚选的时间段弄丢。
             # onchange 用 this.form.submit()，别把 token 拼进 JS 字符串里。
-            picker = ('<form method="GET" action="/report/mine" style="margin-top:10px">'
+            # 模糊查询框刻意放在 form 外面：它是纯前端过滤，
+            # 提交上去会让服务端把名单裁掉，之后清空输入框也捞不回来。
+            picker = ('<p class="sub" style="margin:10px 0 4px">'
+                      '看谁的报工（可代改）</p>'
+                      '<input id="wfilter" placeholder="输工号或姓名，如 C00 或 阿珍"'
+                      ' autocomplete="off" oninput="wfilter(this.value)">'
+                      '<div class="tip" id="wcount"></div>'
+                      '<form method="GET" action="/report/mine" style="margin-top:6px">'
                       f'<input type="hidden" name="t" value="{esc(tok)}">'
                       f'<input type="hidden" name="from" value="{esc(dfrom)}">'
                       f'<input type="hidden" name="to" value="{esc(dto)}">'
-                      '<p class="sub" style="margin:10px 0 4px">'
-                      '看谁的报工（可代改）</p>'
-                      '<select name="ygno" onchange="this.form.submit()">'
+                      '<select name="ygno" id="wsel" onchange="this.form.submit()">'
                       + opts + '</select>'
                       '<button type="submit" class="ghost" style="margin-top:8px">'
-                      '看这个人</button></form>')
+                      '看这个人</button></form>'
+                      '<script>var W_ALL=[' + jall + '],W_CUR="'
+                      + esc(view_ygno) + '";'
+                      'function wfilter(k){'
+                      'var s=document.getElementById("wsel"),'
+                      '  out=[],kk=(k||"").toLowerCase().replace(/\\s+/g,""),i,x;'
+                      'for(i=0;i<W_ALL.length;i++){x=W_ALL[i];'
+                      'if(!kk||x.v.toLowerCase().indexOf(kk)>=0'
+                      '||x.t.toLowerCase().replace(/\\s+/g,"").indexOf(kk)>=0)'
+                      'out.push(x);}'
+                      '/* 过滤后当前看的人不在名单里就把他补回去，'
+                      '否则框里显示成别人、表格里还是原来那个人 */'
+                      'var has=false;for(i=0;i<out.length;i++)'
+                      'if(out[i].v===W_CUR)has=true;'
+                      'if(!has)out.unshift({v:W_CUR,t:W_CUR});'
+                      's.innerHTML="";'
+                      'for(i=0;i<out.length;i++){var o=document.createElement("option");'
+                      'o.value=out[i].v;o.textContent=out[i].t;'
+                      'if(out[i].v===W_CUR)o.selected=true;s.appendChild(o);}'
+                      'document.getElementById("wcount").textContent='
+                      'kk?("匹配 "+out.length+" / "+W_ALL.length+" 人"):"";}'
+                      '</script>')
         head = (f'<div class="card"><h1>👤 '
                 f'{"主管代改" if is_sup_here else "我的报工"}</h1>'
                 f'<p class="sub">{who}　{dfrom} ~ {dto}</p>'
@@ -1819,6 +2038,79 @@ class Handler(BaseHTTPRequestHandler):
                     '<div style="overflow-x:auto;margin-top:10px">'
                     f'<table class="rep"><tr>{cells}</tr>{tr_html}</table></div></div>')
         return self._send(200, _page_shell("我的报工", "".join(body)))
+
+    def _handle_report_manual(self):
+        """主管手动报工（代报）：二维码丢了没法扫码时，主管凭员工+定单号代录。
+
+        三步都是普通 GET 表单（见 page_manual_report），没 JS 也能走完。
+        """
+        auth = self._require_supervisor()
+        if auth is None:
+            return
+        me, tok = auth
+        kw, zq = self._q("wq"), self._q("zq")
+        ygno = self._q("ygno")
+        zdno = self._q("zdno")
+        try:
+            cc = int(self._q("cc") or 0)
+            zh = int(self._q("zh") or 0)
+        except ValueError:
+            cc = zh = 0
+        view = R.bundle_view(zdno, cc, zh) if (zdno and cc and zh) else None
+        # 选定单之前按 zq 模糊搜；选定之后列这个定单的全部扎。
+        bundles = (D.search_bundles(zdno=zdno, limit=80) if zdno
+                   else D.search_bundles(zq, 30)) if not view else []
+        hint_html = ""
+        if view:
+            # 这扎的二维码还在 → 提醒主管优先让工人自己扫，省得代录出错
+            smap = [s for s in D.get_scan_map_by_zdno(zdno)
+                    if int(s["cc"]) == cc and int(s["zh"]) == zh]
+            hint_html = ("这扎的二维码还在（编号 %s），"
+                       "让工人自己扫更快，这页是二维码丢了才用的。"
+                       % esc(smap[0]["short_id"])) if smap else ""
+        return self._send(200, page_manual_report(
+            me, tok, ygno, zdno, cc, zh,
+            D.search_employees(kw, 40) if not ygno else [],
+            bundles,
+            view, kw, zq, hint_html))
+
+    def _handle_report_manual_post(self):
+        """手动报工提交。上限校验与扫码报工完全一致（rules._check_common）。"""
+        # token 在**表单体**里，不是查询串 —— _report_user() 只看 query，
+        # 直接用它会把所有正常提交都判成未登录、弹回登录页。
+        form = self._read_json_form()
+        tok = str(form.get("token", "") or "")
+        me = R.whoami(tok)
+        if not me:
+            return self._redirect_login()
+        if not R.is_supervisor(me["ygno"]):
+            return self._send(403, _page_shell("无权限",
+                '<div class="card"><h1>无权限</h1><p class="sub">'
+                '只有主管可以手动报工。</p></div>'))
+        g = lambda k: str(form.get(k, "") or "").strip()
+        try:
+            info = R.check_manual_report(g("zdno"), g("cc"), g("zh"),
+                                         g("gx"), g("ygno"), g("js"))
+        except R.RuleError as e:
+            # 校验没过：带着原值退回向导，主管改一下就能重填
+            return self._send(400, page_manual_report(
+                me, tok, g("ygno"), g("zdno"),
+                int(g("cc") or 0), int(g("zh") or 0),
+                [], [], R.bundle_view(g("zdno"), int(g("cc") or 0),
+                                      int(g("zh") or 0)),
+                hint_html=f'<b style="color:#c0392b">{esc(e.message)}</b>'))
+        res = D.create_report(
+            short_id="", zdno=info["zdno"], cc=info["cc"], zh=info["zh"],
+            gx=info["gx"], gxname=info["gxname"], ygno=info["ygno"],
+            ygname=info["ygname"], js=info["js"], dj=info["dj"],
+            ip=self.client_address[0], barcode=0, by_supervisor=me["ygno"])
+        if res.get("duplicated"):
+            return self._send(409, page_manual_report(
+                me, tok, info["ygno"], info["zdno"], info["cc"], info["zh"],
+                [], [], R.bundle_view(info["zdno"], info["cc"], info["zh"]),
+                hint_html='<b style="color:#b26a00">刚刚已经报过一模一样的一条了，'
+                        '没有重复计入。</b>'))
+        return self._send(200, page_manual_done(info, me, tok))
 
     def _require_supervisor(self):
         """主管后台一律要 SUPERVISORS 权限。
@@ -1986,6 +2278,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_changes_ack()
         if path == "/change":
             return self._handle_change_form()
+        if path == "/api/report/manual":
+            return self._handle_report_manual_post()
         if path == "/api/change/decide":
             return self._handle_change_decide()
         if path != "/api/report":
@@ -2063,3 +2357,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+

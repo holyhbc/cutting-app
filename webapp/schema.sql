@@ -84,12 +84,15 @@ CREATE TABLE IF NOT EXISTS report (
     dj        REAL    NOT NULL DEFAULT 0,   -- 单价，取自 jfdj.dj
     je        REAL    NOT NULL DEFAULT 0,   -- 金额 = js * dj
     gzdate    TEXT    NOT NULL,              -- 完整日期时间
-    barcode   INTEGER NOT NULL DEFAULT 1,
+    barcode   INTEGER NOT NULL DEFAULT 1,    -- 1=扫码 0=手动输入（DECISIONS D-003）
     status    TEXT    NOT NULL DEFAULT 'pending',  -- pending/synced/failed
     retry     INTEGER NOT NULL DEFAULT 0,
     last_err  TEXT,
     created_at TEXT   NOT NULL,
     synced_at TEXT,
+    -- 主管手动报工时代谁录的（扫码时为空）。没有这个就查不出
+    -- 「这批量是谁按出来的」，出了错也没法追责。
+    by_supervisor TEXT NOT NULL DEFAULT '',
     jfgzid    INTEGER                        -- 回填 jfgz.jfgzid
 );
 CREATE INDEX IF NOT EXISTS ix_report_pending ON report (status, id);

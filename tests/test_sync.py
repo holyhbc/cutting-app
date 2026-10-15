@@ -154,6 +154,31 @@ class TestInsertReport(unittest.TestCase):
         self.assertIn("gzdate", sql)
         self.assertIn("2026-10-12 10:30:00", args)   # 完整时间，不是只有日期
 
+    def test_扫码的barcode写1(self):
+        cur = FakeCursor(scalars={"@@IDENTITY": [[555]]})
+        rec = {"gzdate": "2026-10-12 10:30:00", "ygno": "C002", "zdno": "ZD1",
+               "gx": 1, "cc": 1, "zh": 11, "js": 40, "barcode": 1}
+        SR.insert_report(cur, rec, "四针六线衣", 0.5)
+        self.assertEqual(cur.log[0][1][-1], 1)
+
+    def test_手动录入的barcode写0(self):
+        """D-003：barcode 就是来源标记。主管代录的要能跟扫码的区分开，
+        不然事后分不清这批量是工人自己报的还是别人代录的。
+        """
+        cur = FakeCursor(scalars={"@@IDENTITY": [[556]]})
+        rec = {"gzdate": "2026-10-12 10:30:00", "ygno": "C002", "zdno": "ZD1",
+               "gx": 1, "cc": 1, "zh": 11, "js": 40, "barcode": 0}
+        SR.insert_report(cur, rec, "四针六线衣", 0.5)
+        self.assertEqual(cur.log[0][1][-1], 0,
+                         "手动录入的 barcode 被写成了扫码")
+
+    def test_老数据没带barcode按1处理(self):
+        cur = FakeCursor(scalars={"@@IDENTITY": [[557]]})
+        rec = {"gzdate": "2026-10-12 10:30:00", "ygno": "C002", "zdno": "ZD1",
+               "gx": 1, "cc": 1, "zh": 11, "js": 40}
+        SR.insert_report(cur, rec, "四针六线衣", 0.5)
+        self.assertEqual(cur.log[0][1][-1], 1)
+
     def test_金额按四舍五入三位(self):
         cur = FakeCursor(scalars={"@@IDENTITY": [[1]]})
         rec = {"gzdate": "2026-10-12 10:00:00", "ygno": "C002", "zdno": "ZD1",

@@ -13,6 +13,7 @@
 
 import datetime
 import os
+import sys
 import unittest
 
 from base import ScanTestCase
@@ -744,6 +745,183 @@ def test_其他人的改量不影响(self):
         self.assertEqual(r["js"], 20, "别人的改量不该叠到别人身上")
 
 
+class TestSearchEmployees(ScanTestCase):
+    """主管搜人：按工号或姓名模糊搜。
+
+    数据源必须是花名册 ygzl，不是 list_report_workers ——
+    手动报工就是给「从来没报过工的人」建报工，
+    按报工记录找人会正好把最需要代录的人漏掉。
+    """
+
+    def setUp(self):
+        super().setUp()
+        for no, name in (("C001", "主管"), ("C002", "阿珍"),
+                         ("C003", "阿强"), ("A001", "张伟"),
+                         ("BA00", "王五")):
+            self.add_employee(no, name)
+
+    def _nos(self, kw):
+        return [r["ygno"] for r in self.db.search_employees(kw)]
+
+    def test_按工号搜(self):
+        self.assertEqual(self._nos("A001"), ["A001"])
+
+    def test_按姓名搜(self):
+        self.assertEqual(sorted(self._nos("阿")), ["C002", "C003"])
+
+    def test_工号和姓名都能搜到同一个人(self):
+        self.assertIn("C002", self._nos("阿珍"))
+        self.assertIn("C002", self._nos("C00"))
+
+    def test_工号命中的排前面(self):
+        """主管多半记得工号，输前缀最省事，得排在最前。
+
+        用 A001 / BA00 这组：A0 是 A001 的前缀、只是 BA00 的中间，
+        两条都 LIKE 得到，靠 CASE 才能分出先后。
+        """
+        got = [r["ygno"] for r in self.db.search_employees("A0")]
+        self.assertEqual(got, ["A001", "BA00"], f"前缀命中应排前面，实际 {got}")
+
+    def test_没报过工的人也搜得到(self):
+        """这是手动报工的前提 —— 人不在 report 表里。"""
+        self.assertEqual(
+            self.db.get_conn().execute(
+                "SELECT COUNT(*) FROM report").fetchone()[0], 0)
+        self.assertIn("C002", self._nos("阿珍"))
+
+    def test_离职的不给搜(self):
+        self.db.get_conn().execute("UPDATE ygzl SET ygout=1 WHERE ygno='C003'")
+        self.db.get_conn().commit()
+        self.assertNotIn("C003", self._nos("阿强"))
+
+    def test_通配符被转义(self):
+        """搜 "50%" 不能变成全表匹配 —— LIKE 的 % 是通配符。"""
+        self.assertEqual(self._nos("50%"), [])
+
+    def test_空关键词给常用的人(self):
+        self.assertEqual(len(self.db.search_employees("")), 5)
+
+
+class TestSearchBundles(ScanTestCase):
+    """按定单号模糊搜扎（手动报工第2步）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.add_process("269831", 2, "四针六线裤", 0.77)
+        self.add_process("269832", 2, "三针六线裤", 0.60)
+        self.add_bundle("269831", 1, 10, 100, yn="黑灰")
+        self.add_bundle("269831", 1, 11, 200, yn="大地棕")
+        self.add_bundle("269831", 2, 10, 50, yn="黑灰")
+        self.add_bundle("269832", 1, 1, 30, yn="米白")
+
+    def test_模糊搜定单号(self):
+        got = [b["zdno"] for b in self.db.search_bundles("26983")]
+        self.assertIn("269831", got)
+        self.assertIn("269832", got)
+
+    def test_前缀命中的排前面(self):
+        got = [b["zdno"] for b in self.db.search_bundles("269832")]
+        self.assertEqual(got[0], "269832")
+
+    def test_列出某个定单的全部扎(self):
+        got = self.db.search_bundles(zdno="269831")
+        self.assertEqual([(b["cc"], b["zh"]) for b in got],
+                         [(1, 10), (1, 11), (2, 10)])
+
+    def test_应做数为0的扎不列出来(self):
+        """应做数 0 的扎报了必然超量，不如一开始就不给。"""
+        self.add_bundle("269832", 1, 2, 0, yn="米白")
+        got = [(b["cc"], b["zh"]) for b in self.db.search_bundles(zdno="269832")]
+        self.assertNotIn((1, 2), got)
+
+    def test_带出应做数和颜色(self):
+        b = [x for x in self.db.search_bundles(zdno="269831")
+             if x["zh"] == 10 and x["cc"] == 1][0]
+        self.assertEqual(b["plan_qty"], 100)
+        self.assertEqual(b["yn"], "黑灰")
+
+
+class TestManualReportRules(ScanTestCase):
+    """手动报工必须卡跟扫码报工一模一样的上限。
+
+    这是唯一一条「不进 jfgz 的临时入口」，放松一点就成了
+    绕过应做数的后门 —— 所以两条路共用 rules._check_common。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.add_employee("C001", "主管")
+        self.add_employee("C002", "阿珍")
+        self.add_process("ZD1", 2, "四针六线裤", 0.77)
+        self.add_bundle("ZD1", 1, 10, 100)
+        self.rules = sys.modules["rules"]
+
+    def _ok(self):
+        return self.rules.check_manual_report("ZD1", 1, 10, 2, "C002", 30)
+
+    def test_正常通过(self):
+        info = self._ok()
+        self.assertEqual(info["zdno"], "ZD1")
+        self.assertEqual(info["gxname"], "四针六线裤")
+        self.assertAlmostEqual(info["dj"], 0.77)
+        self.assertEqual(info["short_id"], "", "没有二维码就没有 short_id")
+
+    def test_数量为0被拒(self):
+        with self.assertRaises(self.rules.RuleError) as cm:
+            self.rules.check_manual_report("ZD1", 1, 10, 2, "C002", 0)
+        self.assertEqual(cm.exception.code, "bad_qty")
+
+    def test_数量不是整数被拒(self):
+        with self.assertRaises(self.rules.RuleError):
+            self.rules.check_manual_report("ZD1", 1, 10, 2, "C002", "abc")
+
+    def test_超量被拒(self):
+        with self.assertRaises(self.rules.RuleError) as cm:
+            self.rules.check_manual_report("ZD1", 1, 10, 2, "C002", 101)
+        self.assertEqual(cm.exception.code, "over_limit")
+
+    def test_工序不存在被拒(self):
+        with self.assertRaises(self.rules.RuleError) as cm:
+            self.rules.check_manual_report("ZD1", 1, 10, 99, "C002", 5)
+        self.assertEqual(cm.exception.code, "bad_gx")
+
+    def test_扎没有应做数被拒(self):
+        with self.assertRaises(self.rules.RuleError) as cm:
+            self.rules.check_manual_report("ZD1", 1, 99, 2, "C002", 5)
+        self.assertEqual(cm.exception.code, "no_plan")
+
+    def test_工人不在花名册被拒(self):
+        with self.assertRaises(self.rules.RuleError) as cm:
+            self.rules.check_manual_report("ZD1", 1, 10, 2, "Z999", 5)
+        self.assertEqual(cm.exception.code, "not_found")
+
+    def test_离职工人被拒(self):
+        self.db.get_conn().execute("UPDATE ygzl SET ygout=1 WHERE ygno='C002'")
+        self.db.get_conn().commit()
+        with self.assertRaises(self.rules.RuleError) as cm:
+            self.rules.check_manual_report("ZD1", 1, 10, 2, "C002", 5)
+        self.assertEqual(cm.exception.code, "resigned")
+
+    def test_已报数量算进上限(self):
+        """本地还没同步的报工也得占额度，不能重复报满同一扎。"""
+        self.db.create_report("s", "ZD1", 1, 10, 2, "四针六线裤",
+                              "C002", "阿珍", 90, 0.77)
+        with self.assertRaises(self.rules.RuleError) as cm:
+            self.rules.check_manual_report("ZD1", 1, 10, 2, "C002", 11)
+        self.assertEqual(cm.exception.code, "over_limit")
+        info = self.rules.check_manual_report("ZD1", 1, 10, 2, "C002", 10)
+        self.assertEqual(info["js"], 10)
+
+    def test_和扫码报工共用同一套上限(self):
+        """两条路的 _check_common 必须是同一个函数，不能各写一份。"""
+        import rules
+        import inspect
+        self.assertIn("_check_common(",
+                      inspect.getsource(rules.check_and_build_report))
+        self.assertIn("_check_common(",
+                      inspect.getsource(rules.check_manual_report))
+
+
 class TestListReportWorkers(ScanTestCase):
     """主管选人下拉要带姓名，而且要选中当前看的那个人。"""
 
@@ -769,6 +947,17 @@ class TestListReportWorkers(ScanTestCase):
         self.db.get_conn().commit()
         got = {w["ygno"]: w["ygname"] for w in self.db.list_report_workers()}
         self.assertEqual(got.get("C003"), "工人丙")
+
+    def test_按姓名过滤(self):
+        got = [w["ygno"] for w in self.db.list_report_workers("工人丙")]
+        self.assertEqual(got, ["C003"])
+
+    def test_按工号过滤(self):
+        got = [w["ygno"] for w in self.db.list_report_workers("C002")]
+        self.assertEqual(got, ["C002"])
+
+    def test_过滤无结果返回空(self):
+        self.assertEqual(self.db.list_report_workers("查无此人"), [])
 
 
 class TestChangeSynced(ScanTestCase):

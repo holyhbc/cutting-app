@@ -219,13 +219,23 @@ def apply_change(cur, ch):
 
 
 def insert_report(cur, rec, gxname, dj):
-    """写入 jfgz。barcode=1 表示扫码录入（D-003），gzdate 完整时间（D-004）。"""
+    """写入 jfgz。gzdate 存完整时间（D-004）。
+
+    barcode 跟着 VPS 带来的值写：D-003 里 barcode 就是来源标记，
+    1=扫码、0=主管手动代录。之前这里硬写 1，主机上手工录入的
+    报工混进扫码里，事后对不上是工人自己报的还是主管代录的。
+    老数据没带 barcode 字段时按 1 处理（保持原行为）。
+    """
     je = round(rec["js"] * dj, 3)
+    # 不能写 `int(rec.get("barcode") or 1)` —— barcode=0 是「手动录入」，
+    # 是个有意义的值，被 or 判成假就全变回 1 了，代录的来源标记就丢了。
+    barcode = rec.get("barcode")
+    barcode = 1 if barcode is None else int(barcode)
     cur.execute(
         "INSERT INTO jfgz (gzdate, ygno, zdno, gx, cc, zh, js, dj, je, barcode) "
-        "VALUES (?,?,?,?,?,?,?,?,?,1)",
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
         rec["gzdate"], rec["ygno"], rec["zdno"], rec["gx"], rec["cc"], rec["zh"],
-        rec["js"], dj, je)
+        rec["js"], dj, je, barcode)
     cur.execute("SELECT @@IDENTITY")
     return int(cur.fetchone()[0])
 

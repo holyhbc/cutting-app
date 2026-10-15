@@ -10,6 +10,7 @@
 """
 
 import json
+import re
 import urllib.parse
 import socket
 import unittest
@@ -40,7 +41,9 @@ class HTTPTestCase(ScanTestCase):
     # ---------- HTTP 助手 ----------
 
     def get(self, path, token=None, follow=True):
-        url = self.base + path
+        # 中文查询参数必须转义 —— 直接拼进 URL 会抛 UnicodeEncodeError。
+        # 浏览器会自动转义，测试里得自己来。
+        url = self.base + urllib.parse.quote(path, safe="/?&=%.~+")
         if token:
             url += ("&" if "?" in path else "?") + "t=" + token
         req = urllib.request.Request(url)
@@ -67,10 +70,231 @@ class HTTPTestCase(ScanTestCase):
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read().decode("utf-8", "replace"))
 
+    def post_form(self, path, fields, token=None):
+        """提交 application/x-www-form-urlencoded 表单（手动报工页用的就是它）。"""
+        from urllib.parse import urlencode
+        url = self.base + path
+        req = urllib.request.Request(url, data=urlencode(fields).encode(),
+                                     method="POST",
+                                     headers={"Content-Type":
+                                              "application/x-www-form-urlencoded"})
+        try:
+            r = urllib.request.urlopen(req, timeout=20)
+            return r.getcode(), r.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode("utf-8", "replace")
+
     def login(self, account="C001", pin="5555"):
         code, d = self.post_json("/api/login", {"account": account, "pin": pin})
         self.assertTrue(d.get("ok"), f"登录失败: {d}")
         return d["token"]
+
+
+class TestWorkerFuzzySearch(HTTPTestCase):
+    """"看谁报工"的下拉要能按工号或姓名模糊搜。
+
+    名单有几百人，手机上下拉框翻不动；主管多半只记得「阿」或者「C00」，
+    没有模糊查询就只能一个个划。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.add_employee("C001", "主管")
+        self.add_employee("C002", "阿珍")
+        self.add_employee("C003", "阿强")
+        self.add_process("ZD1", 2, "四针六线裤", 0.77)
+        self.add_bundle("ZD1", 1, 10, 100)
+        for ygno, name in (("C002", "阿珍"), ("C003", "阿强")):
+            self.db.create_report("S", "ZD1", 1, 10, 2, "四针六线裤",
+                                  ygno, name, 20, 0.77)
+        self.sup = self.login("C001")
+
+    def test_有模糊查询框(self):
+        code, body = self.get("/report/mine?ygno=C002", self.sup)
+        self.assertIn('id="wfilter"', body, "少了模糊查询框")
+
+    def test_完整名单喂给前端过滤(self):
+        """过滤在浏览器里做，敲一个字不用重发请求。"""
+        code, body = self.get("/report/mine?ygno=C002", self.sup)
+        self.assertIn("var W_ALL=", body)
+        self.assertIn('v:"C002",t:"C002 阿珍"', body, "工号和姓名都要进过滤表")
+        self.assertIn('v:"C003",t:"C003 阿强"', body)
+
+    def test_姓名里带尖括号也逃不出脚本块(self):
+        """esc() 必须把 < > 转掉，否则姓名能闭合 <script>。"""
+        self.add_employee("C009", "a</script><script>alert(1)</script>b")
+        self.db.create_report("S", "ZD1", 1, 10, 2, "四针六线裤",
+                              "C009", "x", 5, 0.77)
+        code, body = self.get("/report/mine", self.sup)
+        self.assertEqual(body.count("<script>"), 1, "脚本块被闭合了：转义漏了")
+        self.assertNotIn("alert(1)</script>", body)
+
+    def test_工人看不到这个查询框(self):
+        code, body = self.get("/report/mine", self.login("C002"))
+        self.assertNotIn('id="wfilter"', body)
+        self.assertNotIn("W_ALL", body)
+
+    def test_保留当前选中的人(self):
+        code, body = self.get("/report/mine?ygno=C003", self.sup)
+        sel = re.findall(r'<option value="([^"]*)" selected>', body)
+        self.assertEqual(sel, ["C003"])
+
+
+class TestManualReportWizard(HTTPTestCase):
+    """主管手动报工：二维码丢了没法扫码时的代录入口。
+
+    上限校验必须跟扫码报工完全一致 —— 不能因为走「代报」就放松，
+    否则这里就是个绕过应做数的后门。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.add_employee("C001", "主管")
+        self.add_employee("C002", "阿珍")
+        self.add_process("ZD1", 2, "四针六线裤", 0.77)
+        self.add_bundle("ZD1", 1, 10, 100)
+        self.sup = self.login("C001")
+        self.worker = self.login("C002")
+
+    # ---- 第1步：选工人 ----
+
+    def test_第一步能按工号搜(self):
+        code, body = self.get("/report/manual?wq=C002", self.sup)
+        self.assertIn("阿珍", body)
+        self.assertNotIn("ygno=C001", body, "搜 C002 不该把主管也列出来")
+
+    def test_第一步能按姓名搜(self):
+        code, body = self.get("/report/manual?wq=阿", self.sup)
+        self.assertIn("阿珍", body)
+
+    def test_搜不到人给提示(self):
+        code, body = self.get("/report/manual?wq=不存在", self.sup)
+        self.assertIn("没找到", body)
+
+    # ---- 第2步：选定单和扎 ----
+
+    def test_第二步列出扎(self):
+        code, body = self.get("/report/manual?ygno=C002&zq=ZD1", self.sup)
+        self.assertIn("ZD1", body)
+        self.assertIn("第10扎", body)
+        self.assertIn("100件", body)
+
+    def test_第二步支持定单号模糊搜(self):
+        code, body = self.get("/report/manual?ygno=C002&zq=Z", self.sup)
+        self.assertIn("ZD1", body)
+
+    # ---- 第3步：选工序+数量 ----
+
+    def test_第三步列出工序和剩余(self):
+        code, body = self.get(
+            f"/report/manual?ygno=C002&zdno=ZD1&cc=1&zh=10", self.sup)
+        self.assertIn("四针六线裤", body)
+        self.assertIn("剩 100", body)
+
+    def test_提交成功(self):
+        code, body = self.post_form("/api/report/manual", {
+            "token": self.sup, "ygno": "C002", "zdno": "ZD1",
+            "cc": "1", "zh": "10", "gx": "2", "js": "30"})
+        self.assertEqual(code, 200, body[:300])
+        self.assertIn("已记录", body)
+        rep = self.db.get_conn().execute(
+            "SELECT * FROM report ORDER BY id DESC LIMIT 1").fetchone()
+        self.assertEqual(rep["ygno"], "C002", "报工要落在工人头上，不是主管")
+        self.assertEqual(rep["js"], 30)
+        self.assertEqual(rep["gxname"], "四针六线裤")
+
+    def test_标记为手动录入并记下是谁代录的(self):
+        self.post_form("/api/report/manual", {
+            "token": self.sup, "ygno": "C002", "zdno": "ZD1",
+            "cc": "1", "zh": "10", "gx": "2", "js": "30"})
+        rep = self.db.get_conn().execute(
+            "SELECT * FROM report ORDER BY id DESC LIMIT 1").fetchone()
+        self.assertEqual(rep["barcode"], 0, "手动录入 barcode 应为 0")
+        self.assertEqual(rep["by_supervisor"], "C001",
+                         "不记是谁代录的，出了错没法追")
+
+    def test_超量被拒(self):
+        code, body = self.post_form("/api/report/manual", {
+            "token": self.sup, "ygno": "C002", "zdno": "ZD1",
+            "cc": "1", "zh": "10", "gx": "2", "js": "9999"})
+        self.assertEqual(code, 400)
+        self.assertIn("超出剩余数量", body)
+        self.assertNotIn("&lt;b&gt;", body, "提示被二次转义，标签会以源码显示出来")
+        self.assertIn("<b style=", body, "报错提示的加粗没渲染出来")
+        self.assertEqual(
+            self.db.get_conn().execute(
+                "SELECT COUNT(*) FROM report").fetchone()[0], 0)
+
+    def test_重复提交不重复计入(self):
+        fields = {"token": self.sup, "ygno": "C002", "zdno": "ZD1",
+                  "cc": "1", "zh": "10", "gx": "2", "js": "30"}
+        self.assertEqual(self.post_form("/api/report/manual", fields)[0], 200)
+        code, body = self.post_form("/api/report/manual", fields)
+        self.assertEqual(code, 409)
+        self.assertIn("没有重复计入", body)
+        self.assertEqual(
+            self.db.get_conn().execute(
+                "SELECT COUNT(*) FROM report").fetchone()[0], 1)
+
+    def test_不是在职员工被拒(self):
+        self.add_employee("C009", "离职了", active=0)
+        self.db.get_conn().execute("UPDATE ygzl SET ygout=1 WHERE ygno='C009'")
+        self.db.get_conn().commit()
+        code, body = self.post_form("/api/report/manual", {
+            "token": self.sup, "ygno": "C009", "zdno": "ZD1",
+            "cc": "1", "zh": "10", "gx": "2", "js": "5"})
+        self.assertEqual(code, 400)
+        self.assertIn("离职", body)
+
+    def test_花名册里没有的人被拒(self):
+        code, body = self.post_form("/api/report/manual", {
+            "token": self.sup, "ygno": "Z999", "zdno": "ZD1",
+            "cc": "1", "zh": "10", "gx": "2", "js": "5"})
+        self.assertEqual(code, 400)
+        self.assertIn("不在员工花名册", body)
+
+    def test_工序不属于该定单被拒(self):
+        code, body = self.post_form("/api/report/manual", {
+            "token": self.sup, "ygno": "C002", "zdno": "ZD1",
+            "cc": "1", "zh": "10", "gx": "99", "js": "5"})
+        self.assertEqual(code, 400)
+        self.assertIn("没有这道工序", body)
+
+    def test_扎没有应做数被拒(self):
+        code, body = self.post_form("/api/report/manual", {
+            "token": self.sup, "ygno": "C002", "zdno": "ZD1",
+            "cc": "1", "zh": "99", "gx": "2", "js": "5"})
+        self.assertEqual(code, 400)
+        self.assertIn("没有应做数", body)
+
+    # ---- 权限 ----
+
+    def test_工人不能进手动报工页(self):
+        code, body = self.get("/report/manual", self.worker)
+        self.assertEqual(code, 403)
+        self.assertIn("只有主管", body)
+
+    def test_工人不能提交手动报工(self):
+        """光把页面藏起来没用，接口本身也要拦。"""
+        code, body = self.post_form("/api/report/manual", {
+            "token": self.worker, "ygno": "C002", "zdno": "ZD1",
+            "cc": "1", "zh": "10", "gx": "2", "js": "5"})
+        self.assertEqual(code, 403)
+        self.assertEqual(
+            self.db.get_conn().execute(
+                "SELECT COUNT(*) FROM report").fetchone()[0], 0)
+
+    def test_报表页有入口(self):
+        # /report 的入口列表挂在「有同步过的报工数据」这个前提上
+        # （空库时直接返回空态页），所以先造一份 jfgz 镜像。
+        self.push_reports([(555, "2026-10-13 01:50:00", "C002", "阿珍",
+                            "ZD1", 2, 1, 10, 20, 0.77, 15.4, 1)])
+        code, body = self.get("/report", self.sup)
+        self.assertIn("/report/manual", body)
+
+    def test_工人的报表页没有入口(self):
+        code, body = self.get("/report", self.worker)
+        self.assertNotIn("/report/manual", body)
 
 
 class TestLoginApi(HTTPTestCase):

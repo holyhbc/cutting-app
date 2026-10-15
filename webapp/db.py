@@ -298,6 +298,69 @@ def get_scan_map_by_zdno(zdno):
     return [dict(r) for r in rows]
 
 
+# ============================================================
+# 手动报工 / 模糊搜索（主管专用）
+# ============================================================
+
+def search_employees(keyword="", limit=40, active_only=True):
+    """按工号**或**姓名模糊搜花名册。
+
+    主管手动报工要给「从来没报过工的人」建报工，所以数据源是 ygzl 花名册，
+    不是 list_report_workers —— 那张表只含有过报工记录的人。
+
+    工号前缀命中的排前面：主管多半记得工号，直接输前缀最省事。
+    """
+    kw = (keyword or "").strip()
+    if not kw:
+        where = "ygout=0" if active_only else "1=1"
+        sql = f"SELECT ygno, ygname, ygout FROM ygzl WHERE {where} ORDER BY ygno LIMIT ?"
+        args = (int(limit),)
+    else:
+        where = "ygout=0" if active_only else "1=1"
+        # LIKE 的 % 通配要转义，不然主管搜 "50%" 会变成通配符匹配全表
+        like = "%" + kw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        sql = (f"SELECT ygno, ygname, ygout FROM ygzl WHERE {where} "
+               f"  AND (ygno LIKE ? ESCAPE '\\' OR ygname LIKE ? ESCAPE '\\') "
+               f"ORDER BY CASE WHEN ygno LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END, ygno "
+               f"LIMIT ?")
+        args = (like, like, kw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%",
+                int(limit))
+    return [dict(r) for r in get_conn().execute(sql, args).fetchall()]
+
+
+def search_bundles(keyword="", limit=40, zdno=None):
+    """按定单号模糊搜扎（应做数 > 0 的），或列出某个定单的全部扎。
+
+    数据源是 bundle（jfzd2 快照），不是 scan_map ——
+    二维码丢了不等于没这扎，bundle 里才是权威的应做数。
+    定单号前缀命中的排前面。
+    """
+    kw = (keyword or "").strip()
+    cond = ""
+    args = []
+    args_prefix = []
+    if zdno:
+        cond = " WHERE b.zdno=?"
+        args.append(zdno)
+    elif kw:
+        like = "%" + kw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        cond = " WHERE b.zdno LIKE ? ESCAPE '\\'"
+        args.append(like)
+        args_prefix = [kw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"]
+    rows = get_conn().execute(
+        "SELECT b.zdno, b.cc, b.zh, SUM(b.plan_qty) plan_qty, "
+        "       COALESCE(MIN(NULLIF(b.yn,'')),'') yn "
+        "  FROM bundle b" + cond +
+        " GROUP BY b.zdno, b.cc, b.zh "
+        "HAVING SUM(b.plan_qty) > 0 "
+        + ("ORDER BY CASE WHEN b.zdno LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END,"
+           "         b.zdno, b.cc, b.zh" if args_prefix else
+           "ORDER BY b.zdno, b.cc, b.zh")
+        + " LIMIT ?", (*args, *args_prefix, int(limit))).fetchall()
+    return [{"zdno": r[0], "cc": int(r[1]), "zh": int(r[2]),
+             "plan_qty": int(r[3] or 0), "yn": r[4] or ""} for r in rows]
+
+
 def get_bundle_colors(zdno, cc, zh):
     """某一扎的颜色/尺码/数量明细。
 
@@ -346,7 +409,8 @@ def get_processes(zdno):
 IDEM_WINDOW_SEC = 120   # 同一笔报工的判重时间窗（秒）
 
 
-def create_report(short_id, zdno, cc, zh, gx, gxname, ygno, ygname, js, dj, ip=""):
+def create_report(short_id, zdno, cc, zh, gx, gxname, ygno, ygname, js, dj, ip="",
+                  barcode=1, by_supervisor=""):
     """新增报工。
 
     幂等：同一标签+扎+工序+员工+数量，在 IDEM_WINDOW_SEC 秒内只算一条。
@@ -356,6 +420,10 @@ def create_report(short_id, zdno, cc, zh, gx, gxname, ygno, ygname, js, dj, ip="
     手机慢一点、工人连点两下「提交」，两笔间隔一两秒就会各插一条，
     数量直接翻倍。所以判重必须在应用层按时间窗做。
     数据库索引只作为「同一秒内」的兜底。
+
+    barcode=0 表示主管手动录入（没有二维码），by_supervisor 记下是谁代录的。
+    这两个值会原样同步到 SQL Server 的 jfgz.barcode —— 按 D-003，
+    barcode 就是「扫码 / 手动」的来源标记，不该一律写成 1。
     """
     je = round(float(js) * float(dj), 4)
     stamp = now_str()
@@ -374,16 +442,18 @@ def create_report(short_id, zdno, cc, zh, gx, gxname, ygno, ygname, js, dj, ip="
         try:
             conn.execute(
                 "INSERT INTO report (short_id, zdno, cc, zh, gx, gxname, ygno, ygname, "
-                "js, dj, je, gzdate, barcode, status, created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,'pending',?)",
+                "js, dj, je, gzdate, barcode, by_supervisor, status, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?)",
                 (short_id, zdno, int(cc), int(zh), int(gx), gxname, ygno, ygname,
-                 int(js), float(dj), je, stamp, stamp))
+                 int(js), float(dj), je, stamp, int(barcode), by_supervisor, stamp))
             conn.commit()
             new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-            conn.execute("UPDATE scan_map SET used_count=used_count+1 WHERE short_id=?",
-                         (short_id,))
-            conn.commit()
-            log_audit("report", f"#{new_id} {zdno} cc{cc} zh{zh} gx{gx} {ygno} x{js}", ip)
+            if short_id:
+                conn.execute("UPDATE scan_map SET used_count=used_count+1 WHERE short_id=?",
+                             (short_id,))
+                conn.commit()
+            tag = f" 手工({by_supervisor})" if by_supervisor else ""
+            log_audit("report", f"#{new_id} {zdno} cc{cc} zh{zh} gx{gx} {ygno} x{js}{tag}", ip)
             return {"id": new_id, "created": True, "duplicated": False}
         except sqlite3.IntegrityError:
             row = conn.execute(
@@ -1069,18 +1139,36 @@ def report_mine_summary(dfrom, dto, ygno):
     }
 
 
-def list_report_workers(limit=300):
+def list_report_workers(keyword="", limit=300):
     """有报工记录的工号 + 姓名，供主管选择看谁/代改谁的报工。
 
     只返回工号的话，主管根本认不出谁是谁，一百多号人对着工号猜。
     姓名优先取最近一条报工自带的 ygname，退回 ygzl 花名册 ——
     ygzl 没同步到的新员工，至少还有报工记录里的名字。
+
+    keyword 非空时按工号或姓名过滤：主管常常只记得「阿」或者「C00」，
+    几百个 option 在手机上下拉框里翻不动。
     """
-    return [dict(r) for r in get_conn().execute(
-        "SELECT t.g ygno,"
-        "       COALESCE(NULLIF(rr.ygname,''), NULLIF(z.ygname,''), '') ygname "
-        "  FROM (SELECT ygno g, MAX(id) id FROM report "
-        "         WHERE ygno IS NOT NULL AND ygno<>'' GROUP BY ygno) t "
-        "  LEFT JOIN report rr ON rr.id = t.id "
-        "  LEFT JOIN ygzl z ON z.ygno = t.g "
-        " ORDER BY t.g LIMIT ?", (int(limit),)).fetchall()]
+    kw = (keyword or "").strip()
+    if kw:
+        like = "%" + kw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        sql = ("SELECT t.g ygno, "
+               "       COALESCE(NULLIF(rr.ygname,''), NULLIF(z.ygname,''), '') ygname "
+               "  FROM (SELECT ygno g, MAX(id) id FROM report "
+               "         WHERE ygno IS NOT NULL AND ygno<>'' GROUP BY ygno) t "
+               "  LEFT JOIN report rr ON rr.id = t.id "
+               "  LEFT JOIN ygzl z ON z.ygno = t.g "
+               " WHERE COALESCE(NULLIF(rr.ygname,''), NULLIF(z.ygname,''), '') LIKE ? "
+               "    ESCAPE '\\' OR t.g LIKE ? ESCAPE '\\' "
+               " ORDER BY t.g LIMIT ?")
+        rows = get_conn().execute(sql, (like, like, int(limit))).fetchall()
+    else:
+        rows = get_conn().execute(
+            "SELECT t.g ygno, "
+            "       COALESCE(NULLIF(rr.ygname,''), NULLIF(z.ygname,''), '') ygname "
+            "  FROM (SELECT ygno g, MAX(id) id FROM report "
+            "         WHERE ygno IS NOT NULL AND ygno<>'' GROUP BY ygno) t "
+            "  LEFT JOIN report rr ON rr.id = t.id "
+            "  LEFT JOIN ygzl z ON z.ygno = t.g "
+            " ORDER BY t.g LIMIT ?", (int(limit),)).fetchall()
+    return [dict(r) for r in rows]
