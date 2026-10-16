@@ -108,7 +108,9 @@ def main():
 
     ap = argparse.ArgumentParser(description="推送 jfgz 报工明细到 VPS（阶段4报表）")
     ap.add_argument("--push", default="https://cut.holyhbc.eu.org", help="VPS 地址")
-    ap.add_argument("--conn", default=None, help="SQL Server 连接串（默认生产库）")
+    ap.add_argument("--conn", default=None,
+                    help="SQL Server 连接串（默认读 HBC_SERVER/HBC_DB 等环境变量，"
+                         "HBC_DB 缺省为测试库 ShintHrmDb-test；推生产请显式设置）")
     ap.add_argument("--token", default=os.environ.get("SYNC_TOKEN", ""),
                     help="推送令牌（或设环境变量 SYNC_TOKEN）")
     ap.add_argument("--since-id", type=int, default=0, help="只推 jfgzid 大于此值的（默认全量）")

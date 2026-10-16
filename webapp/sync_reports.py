@@ -27,9 +27,9 @@ VPS 只存暂存数据，从不直连数据库。
 import argparse
 import json
 import os
+import subprocess
 import sys
 import io
-import hashlib
 import urllib.request
 import urllib.error
 from datetime import datetime
@@ -38,7 +38,6 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="repla
                               line_buffering=True)
 import pyodbc
 
-A32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 MAX_BATCH = 200
 
 
@@ -418,8 +417,15 @@ def main():
     # 3. 刷新基线
     if args.push_baseline and not args.dry_run:
         print("\n刷新基线…")
-        os.system(f'"{sys.executable}" "{os.path.join(os.path.dirname(os.path.abspath(__file__)), "sync_snapshot.py")}" '
-                  f'--push "{args.server}" --token {args.token}')
+        # 用 subprocess 列表参数而不是 os.system 拼字符串：
+        # os.system 会把令牌暴露在进程列表里，令牌里若有 shell 元字符还会被当成命令执行。
+        snap = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "sync_snapshot.py")
+        try:
+            subprocess.run([sys.executable, snap, "--push", args.server,
+                            "--token", args.token], check=False)
+        except Exception as e:
+            print(f"刷新基线失败：{e}")
     elif args.push_baseline:
         print("\n（dry-run 模式不推送基线）")
 

@@ -723,7 +723,8 @@ def page_admin_reports(rows, token, kind):
                     '· 超量的 → 让工人核对数量，确实报多了就<b>作废</b>这条，'
                     '正确的数重新报；已报进去的要改，走「改量审批」。<br>'
                     '· 工序不存在的 → 标签可能印错了，重新印标签。<br>'
-                    '作废后件数不再计入统计。</p></div>'
+                    '作废后件数不再计入统计，<b>占用的剩余额度也会同时释放</b>'
+                    '（没作废前，这条会一直占着该扎该工序的额度）。</p></div>'
                     '<script>function discard(id){'
                     ' if(!confirm("确定作废这条报工？作废后不能恢复。")) return;'
                     ' fetch("/api/report/discard",{method:"POST",'
@@ -1495,7 +1496,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, "<h1>404</h1>", head_only=head_only)
         except Exception as e:
             D.log_audit("error", f"GET {path}: {e}", self.client_address[0])
-            return self._send(500, f"<h1>500</h1><pre>{esc(e)}</pre>", head_only=head_only)
+            # 不回显异常原文：里面可能有 SQL、路径等内部信息。
+            # 详细原因已写进 audit 表，排查看那里。
+            return self._send(500, _page_shell("出错了",
+                '<div class="card"><h1>出错了</h1><p class="sub">'
+                '服务器内部错误，请返回重试；如果一直这样，截图给班组长。</p></div>'),
+                head_only=head_only)
 
     def _handle_report_discard(self):
         """作废一条未同步的报工。
@@ -1867,8 +1873,12 @@ class Handler(BaseHTTPRequestHandler):
         is_sup_here = R.is_supervisor(me["ygno"])
         # 主管可以带 ygno 看别人的报工，工人只能看自己
         view_ygno = (self._q("ygno") or me["ygno"]) if is_sup_here else me["ygno"]
-        rows = D.report_mine(dfrom, dto, view_ygno, 300)
-        summ = D.report_mine_summary(dfrom, dto, view_ygno)
+        # 只查一次完整明细：300 条给页面显示，汇总就地算。
+        # 以前先 report_mine(300) 再 report_mine_summary(limit=100000)，
+        # 同一份数据合并、叠加改量算了两遍。
+        rows_all = D.report_mine(dfrom, dto, view_ygno, 100000)
+        summ = D.summarize_rows(rows_all)
+        rows = rows_all[:300]
         trs = []
         for r in rows:
             cls = RC.get(r.get("src"), "r-sync")
@@ -2299,16 +2309,19 @@ class Handler(BaseHTTPRequestHandler):
             tok = get("token")
             me = R.whoami(tok)
             try:
-                # 已登录的以令牌为准，防冒名；未登录的退回工号校验（过渡期）
-                emp = me if me else R.find_employee(get("ygno"))
+                # 必须登录：令牌是唯一可信身份。早期为过渡期保留了
+                # 「未登录传工号」的兜底，等于知道标签短ID就能冒名任意在职工号。
+                if not me:
+                    raise R.RuleError("提交前请先登录（填工号/手机号和 PIN）",
+                                      "not_logged_in")
+                emp = me
                 info = R.check_and_build_report(
                     sid, get("zdno") or smap["zdno"], get("cc") or smap["cc"],
                     get("zh") or smap["zh"], get("gx"), emp["ygno"], get("js"))
             except R.RuleError as e:
-                m2 = R.whoami(tok)
+                # 校验失败时数据没变，直接用刚取的 view，不必重建
                 return self._send(400, page_scan(
-                    smap, R.bundle_view(smap["zdno"], smap["cc"], smap["zh"]),
-                    err=e.message, me=m2, token=tok))
+                    smap, view, err=e.message, me=me, token=tok))
 
             res = D.create_report(
                 short_id=info["short_id"], zdno=info["zdno"], cc=info["cc"],
@@ -2333,7 +2346,9 @@ class Handler(BaseHTTPRequestHandler):
 
         except Exception as e:
             D.log_audit("error", f"POST: {e}", self.client_address[0])
-            return self._send(500, f"<h1>500</h1><pre>{esc(e)}</pre>")
+            return self._send(500, _page_shell("出错了",
+                '<div class="card"><h1>出错了</h1><p class="sub">'
+                '服务器内部错误，请返回重试；如果一直这样，截图给班组长。</p></div>'))
 
 
 def main():

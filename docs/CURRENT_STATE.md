@@ -1,6 +1,7 @@
 # 当前状态快照
 
-> 最后更新：2026-10-09（含实库核查、用户澄清、GitHub 远程配置）
+> 最后更新：2026-10-16（刷新文件行数/测试数；二维码阶段已完工；新增 webapp 模块清单。
+> 项目进度清单见 `docs/TODO.md`，历史变更见 `docs/CHANGELOG.md`）
 > 用途：新会话接手时先读这份文件，5 秒内知道"现在能不能跑、下一步做什么"。
 >
 > **给接手的人**：远程仓库是 https://github.com/holyhbc/cutting-app ，
@@ -12,13 +13,27 @@
 
 | 文件 | 大小 | 行数 | 编译 |
 |---|---|---|---|
-| `cutt/hbc-print-v7.7.4-多颜色完整优化版.py` | 229431 B | 5243 | ✅ |
-| `cutt/zdno_edit.py` | 87204 B | — | ✅ |
+| `cutt/hbc-print-v7.7.4-多颜色完整优化版.py` | 249458 B | 5694 | ✅ |
+| `cutt/zdno_edit.py` | 87204 B | 2095 | ✅ |
+| `cutt/report.py`（桌面报表） | 36272 B | 873 | ✅ |
+| `webapp/app.py`（扫码报工 HTTP 服务） | 122804 B | 2376 | ✅ |
+| `webapp/db.py`（SQLite 存取层） | 54416 B | 1219 | ✅ |
+| `webapp/rules.py`（业务规则） | 15402 B | 396 | ✅ |
 
 ```bash
 cd /mnt/g/hbc/opencode/cutt
 python3 -m py_compile "hbc-print-v7.7.4-多颜色完整优化版.py" && echo OK
 ```
+
+### 自动化测试
+
+```bash
+cd /mnt/g/hbc/opencode
+python3 tests/run_all.py        # 离线跑，不连 SQL Server、不联网
+```
+
+最后一次全量：**2026-10-16，236/236 通过**（约 140 秒）。
+CI：`.github/workflows/tests.yml`（Python 3.8 / 3.11 / 3.13 + `.cmd` 纯 ASCII 检查）。
 
 ---
 
@@ -48,16 +63,19 @@ git add -A && git commit -m "..." && git push
 
 ### 提交历史
 
+共 65 个提交，最近几条（完整历史 `git log --oneline`）：
+
 ```
+5c36cc1 feat: 看谁报工支持模糊查询 + 主管手动报工（代录）
+35ea5b5 fix: 改量从没真正写进过 jfgz —— new_num/new_js 字段名对不上
+4300f53 fix: 同步过了还显示「等同步」+ 主管选人下拉不显示选中项
+a7f6ae4 fix: 改量回写在 main() 里用未初始化的 cur —— 线上一直失败
+74915c1 fix: 改量链接传错 id 导致 404 + 报工幂等挡不住连点
+16d3f25 ci: GitHub Actions 自动跑测试
+750efef test: 76 项自动化测试（零依赖，不连库不联网）
 244781c docs: VPS 部署步骤（Nginx + systemd + 证书 + 快照推送）
 9f8be9f feat: 快照推送接口，VPS 可独立运行（局域网主动出站）
 727c382 feat(阶段1): 扫码报工 Web 服务 + 快照同步器
-c0a4ff4 feat(阶段0): 标签二维码 —— 短ID生成、版面避让、机器解码验证
-5afaf08 docs: gzdate 决策确认（写完整 datetime），设计前提全部落定
-574c245 feat(sql): 新增版本化数据库升级脚本体系
-e0db133 docs: 实库核查结果，订正 5 处被证伪的假设
-6a74932 docs: 将 md 文档移入 docs/ 目录
-9d92957 baseline: hbc-print + zdno_edit + project docs
 ```
 
 ### ⚠️ 公开仓库里已存在的信息（用户已知悉并确认）
@@ -168,12 +186,14 @@ sql/
 
 ---
 
-## 六、二维码阶段 0 进度：未开始
+## 六、二维码阶段 0：已完成 ✅
 
 | 位置 | 内容 | 状态 |
 |---|---|---|
-| `hbc-print...py:1805` | `make_full_barcode()` | 原始 `4+5+3+1 = 13位`，未改动 |
-| `create_barcode_pdf()` 内 `draw_label()` | 标签绘制 | 仍是纯条码 |
+| `hbc-print...py:1823` | `make_full_barcode()` | 原始 `4+5+3+1 = 13位`，**未改动**（兼容老扫码枪） |
+| `hbc-print...py:1836` | `gen_short_id(zdno, cc, zh)` | ✅ sha1→base32 8 位短ID |
+| `draw_label()` | 标签左下角 13mm 二维码 | ✅ 已加（`label_qr_enabled` 控制，默认 False 关） |
+| 样张验证 | 机器解码 38/38、微信实扫 | ✅ 2026-10-09 通过 |
 
 `gen_short_id(zdno, cc, zh)` 只标识"一扎"，不涉及工序，**不受本轮发现影响，可立即开工**。
 

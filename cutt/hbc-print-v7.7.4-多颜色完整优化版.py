@@ -176,6 +176,11 @@ def get_conn(conn_string, timeout=10, autocommit=True):
         # 连接可能被别处关闭过，先确认还活着再复用，避免把死连接一直传下去
         try:
             conn.cursor().execute("SELECT 1")
+            # autocommit 是可变状态：写库函数在 finally 里把它设回 True，
+            # 不复位的话下次 autocommit=False 的调用会拿回自动提交的连接，
+            # 里面的 conn.rollback() 就成了空操作，出错会留半截已提交的数据。
+            if bool(getattr(conn, "autocommit", True)) != bool(autocommit):
+                conn.autocommit = bool(autocommit)
             _conn_local.last_used = datetime.now()
             return conn
         except Exception:
@@ -5687,5 +5692,4 @@ if __name__ == "__main__":
             close_connections()
 
     root.protocol("WM_DELETE_WINDOW", _cleanup)
-    root.mainloop()
     root.mainloop()

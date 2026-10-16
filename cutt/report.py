@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import csv
-import json  # noqa: F401
 import os
 import queue
 import sys
@@ -427,7 +426,7 @@ class ReportWindow:
         self._build_group_tab()
         self._build_detail_tab()
 
-        self._build_statusbar(main)
+        self._statusbar(main)
 
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._poll()
@@ -542,7 +541,7 @@ class ReportWindow:
         frame = ttk.Frame(win, padding=14)
         frame.pack(fill="both", expand=True)
 
-        dfrom = tk.StringVar(value=self._dstr(today.replace(day=1) - timedelta(days=1)) if False else self._dstr((today.replace(day=1) - timedelta(days=1))))
+        dfrom = tk.StringVar(value=self._dstr(today.replace(day=1) - timedelta(days=1)))
         dto = tk.StringVar(value=self._dstr(today))
         result = {}
 
@@ -636,7 +635,6 @@ class ReportWindow:
             messagebox.showinfo("提示", "先查一个定单再导出")
             return
         zdno = self._progress_zdno
-        rows = [list(r) for r in self.tr_bundles.get_children()]  # 显示值
         # 拉真实数据导出
         self._run(lambda: self.db.progress_bundles(zdno),
                   lambda d: self._save_progress(zdno, d))

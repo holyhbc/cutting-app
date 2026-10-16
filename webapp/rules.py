@@ -7,7 +7,8 @@ import re
 
 import db as D
 
-from db import (get_conn, get_plan_qty, get_reported_qty, get_reported_by_employee,
+from db import (get_conn, get_plan_qty, get_reported_qty, get_reported_by_gx,
+               get_reported_by_employee,
                get_bundle_colors, get_zdno_summary, now_str)
 
 # 一次报工的数量上限，防止误填把手数当件数
@@ -272,11 +273,14 @@ def bundle_view(zdno, cc, zh):
     plan = get_plan_qty(zdno, cc, zh)
     colors = get_bundle_colors(zdno, cc, zh)
     summary = get_zdno_summary(zdno, cc)
+    # 一次取回全部工序的已报量：逐道调 get_reported_qty 是 N+1，
+    # 扫码页每次加载、每次提交后刷新都要走这里。
+    reported_map = get_reported_by_gx(zdno, cc, zh)
     procs = []
     for p in get_conn().execute(
             "SELECT gx, gxname, dj FROM process WHERE zdno=? ORDER BY gx", (zdno,)):
         gx = p[0]
-        reported = get_reported_qty(zdno, cc, zh, gx)
+        reported = reported_map.get(int(gx), 0)
         procs.append({
             "gx": gx, "gxname": p[1], "dj": p[2],
             "reported": reported,

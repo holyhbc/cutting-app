@@ -32,6 +32,9 @@ def get_conn():
         conn = sqlite3.connect(DB_PATH, timeout=15, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")     # 允许读并发
+        # WAL 模式下官方推荐 NORMAL：掉电最多丢最后几笔已提交事务，不会损坏库。
+        # 默认 FULL 每次 commit 都 fsync，报工/审计/登录在 VPS 上每条都多等一次刷盘。
+        conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA foreign_keys=ON")
         _local.conn = conn
     return conn
@@ -220,8 +223,17 @@ def init_db():
     # 旧表缺 status 列时，建索引会直接报错，ALTER 根本没机会跑。
     _migrate(conn)
     with open(SCHEMA, "r", encoding="utf-8") as f:
-        conn.executescript(f.read())
-    conn.commit()
+        sql = f.read()
+    # 显式包一个事务：executescript 不会自动开事务，每条 DDL 各自提交，
+    # 几十条建表/建索引语句就是几十次 fsync，初始化慢一个数量级。
+    try:
+        conn.executescript("BEGIN;\n" + sql + "\nCOMMIT;")
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
 
 
 def log_audit(action, detail="", ip=""):
@@ -279,6 +291,30 @@ def get_reported_qty(zdno, cc, zh, gx):
         "WHERE zdno=? AND cc=? AND zh=? AND gx=? AND status IN ('pending','failed')",
         (zdno, int(cc), int(zh), int(gx))).fetchone()
     return base_qty + int(pending[0])
+
+
+def get_reported_by_gx(zdno, cc, zh):
+    """一次取回该扎所有工序的已报量 {gx: 已报}。
+
+    扫码页要列全部工序的剩余数，逐道调 get_reported_qty 是 N+1 ——
+    每道工序两次查询，9 道工序就是 18 次，而页面加载和提交后刷新各调一遍。
+    这里用两条聚合查询一次算完，结果与 get_reported_qty 逐道查完全一致。
+    """
+    conn = get_conn()
+    out = {}
+    for r in conn.execute(
+            "SELECT gx, reported_qty FROM report_baseline "
+            "WHERE zdno=? AND cc=? AND zh=?",
+            (zdno, int(cc), int(zh))):
+        out[int(r[0])] = int(r[1] or 0)
+    for r in conn.execute(
+            "SELECT gx, COALESCE(SUM(js),0) FROM report "
+            "WHERE zdno=? AND cc=? AND zh=? AND status IN ('pending','failed') "
+            "GROUP BY gx",
+            (zdno, int(cc), int(zh))):
+        gx = int(r[0])
+        out[gx] = out.get(gx, 0) + int(r[1] or 0)
+    return out
 
 
 def get_reported_by_employee(zdno, cc, zh, gx, ygno):
@@ -1127,9 +1163,13 @@ def report_mine(dfrom, dto, ygno, limit=100):
     return merged
 
 
-def report_mine_summary(dfrom, dto, ygno):
-    """某工人在指定范围的合计（件数/金额/笔数），含未同步的本地暂存。"""
-    rows = report_mine(dfrom, dto, ygno, limit=100000)
+def summarize_rows(rows):
+    """把 report_mine 的结果行汇总成 件数/金额/笔数。
+
+    单独抽出来是为了让调用方（报工页）能只查一次明细 ——
+    以前页面先 report_mine(limit=300) 再 report_mine_summary(limit=100000)，
+    同一份数据合并、叠加改量算了两遍。
+    """
     return {
         "cnt": len(rows),
         "pcs": sum(int(r["js"] or 0) for r in rows),
@@ -1137,6 +1177,11 @@ def report_mine_summary(dfrom, dto, ygno):
         "pending": sum(1 for r in rows if r.get("src") == "pending"),
         "failed": sum(1 for r in rows if r.get("src") == "failed"),
     }
+
+
+def report_mine_summary(dfrom, dto, ygno):
+    """某工人在指定范围的合计（件数/金额/笔数），含未同步的本地暂存。"""
+    return summarize_rows(report_mine(dfrom, dto, ygno, limit=100000))
 
 
 def list_report_workers(keyword="", limit=300):
